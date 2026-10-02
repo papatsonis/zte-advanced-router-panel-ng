@@ -41,7 +41,7 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
 | **Device info** | CPU temperature and load, memory, uptime, WAN details, GPS position with a map link, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
 | **WiFi** | Radio info, transmit power, country |
-| **Login & tools** | Auto login, developer login, copy a signal report |
+| **Login & tools** | Optional auto login, developer login, copy a signal report |
 
 **Full edition only:** API finder (searches the router's own web code for a keyword), call recorder (logs the calls the router's pages make), custom ubus call, raw netinfo dump, raw scan data, 5G NSA lock probe.
 
@@ -52,13 +52,22 @@ Tested on a **ZTE MC7530**. The basic calls come from ZTE-Script-NG, which was w
 ## Things to know before you click
 
 - **Everything stays local.** The script only talks to your router. The only outside links are the ones you click yourself (the map link and the tip links).
-- **Auto Login** stores a SHA-256 hash of your router password in the browser's local storage. Anyone who can use that browser profile could use it to log in to the router.
+- **You log in on the router's own page.** The panel starts once you are in and pauses whenever you are logged out.
+- **Auto login is optional and off by default.** If you turn it on (🔑 Auto Login), a SHA-256 hash of the router password is kept in the browser's storage for the router's address. Anyone who can use that browser profile can then open the router page, and the hash itself is enough to log in — so do not turn it on on a shared computer. "Forget Password" removes it.
 - **Band and cell locks stay in place** until you remove them. "Remove band lock" works by locking to the list of all bands in the `CFG` block — adjust that list to your model.
 - **Locking to a cell of another operator** leaves the router without service until you unlock it. A cell lock takes effect after you switch network mode or reboot.
 - **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
 
 This project is not affiliated with ZTE. Use it at your own risk.
+
+## Auto login
+
+With a saved password, the panel logs in for you when you open the router page and nobody is logged in. It logs in once and then reloads the page once, so that the router's own page starts up already logged in — you see a short flash of the login form first.
+
+- It is skipped right after you press **Logout**, so logging out works. Reload the page a few seconds later to log in again.
+- It never logs in while you are using the router page. If the session ends, the panel pauses and waits for you.
+- If the router rejects the saved password, the panel removes it and tells you.
 
 ## Configuration
 

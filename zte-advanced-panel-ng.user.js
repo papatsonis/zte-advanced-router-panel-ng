@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.21
+// @version      2026-ng1.25
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, neighbor scan, bridge mode, DNS, APN, traffic stats, GPS, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -85,7 +85,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.21",
+    version: "2026-ng1.25",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -100,8 +100,6 @@
     lte_all_bands: [1, 3, 7, 8, 20, 28, 38, 40, 41, 42, 43],
     nr_all_bands: ["1", "3", "7", "8", "20", "28", "38", "40", "41", "75", "77", "78"],
     nr_type_variants: ["1", "NSA", "nsa", "ENDC", "LTE_AND_5G"], // extra values tried by "Probe 5G NSA lock"
-    // localStorage key shared with ZTE-Script-NG, so a saved password works in both
-    pw_storage_key: "ScriptPasswordHash",
   };
 
   var ZERO_SID = "00000000000000000000000000000000";
@@ -118,9 +116,8 @@
     traffic: {},
     lte: [],
     nr: [],
-    denied_streak: 0,
-    relogin_running: false,
-    last_relogin: 0,
+    session_lost: false,
+    lost_checks: 0,
     expired_warned: false,
     poll_timer: null,
     poll_tick: 0,
@@ -190,7 +187,7 @@
       top += toastQueue[i].offsetHeight + 8;
     }
   }
-  function toast(msg, type) {
+  function toast(msg, type, ms) {
     var colors = { info: "#1976D2", ok: "#388E3C", warn: "#F57C00", error: "#D32F2F" };
     var el = document.createElement("div");
     el.style.cssText =
@@ -211,7 +208,7 @@
         el.remove();
         repositionToasts();
       }, 350);
-    }, CFG.toastDuration);
+    }, ms || CFG.toastDuration);
   }
 
   // ─────────────────────────────────────────────
@@ -328,6 +325,7 @@
     max = max || CFG.retryOnAccessDenied;
     var res;
     for (var i = 0; i < max; i++) {
+      if (i) await new Promise(function (r) { setTimeout(r, 250); }); // never hammer the router
       res = await ubus(calls, opts);
       var denied = Array.isArray(res) ? res.some(function (r) { return r.accessDenied; }) : res.accessDenied;
       if (!denied) break;
@@ -353,20 +351,57 @@
   //  AUTH (ubus: zwrt_web)
   //  final password = SHA256( SHA256(password) + zte_web_sault ), uppercase hex
   // ─────────────────────────────────────────────
-  function stored_hash() {
-    try { return localStorage.getItem(CFG.pw_storage_key); } catch (e) { return null; }
+  // Auto login (optional): a SHA256 hash of the router password, saved only if the user asks.
+  //
+  // How it works, and why it is done exactly this way:
+  //   - The saved password is used only when the router page is opened and nobody is logged in.
+  //     The panel logs in once, stores the session token where the router's page keeps it
+  //     (sessionStorage "ct") and reloads the page once. The router's page then starts up
+  //     already logged in — the same thing that happens when a logged-in page is refreshed.
+  //   - The panel never logs in while the router's page is running. A login made behind the
+  //     page's back is not picked up by it, and a second session only gets in the way.
+  //   - Right after a Logout the saved password is not used, so that logging out works.
+  var PW_KEY = "ZtePanelPwHash";          // localStorage: SHA256 of the password, if saved
+  var TRIED_KEY = "ZtePanelAutoLoginAt";  // sessionStorage (per tab): an automatic login + reload is under way (no reload loops)
+  var LOGOUT_KEY = "ZtePanelLogoutAt";    // localStorage: the page was left with its session token already removed
+  var SEEN_KEY = "ZtePanelSeenAlive";     // sessionStorage (per tab): time of the last successful poll
+
+  function saved_hash() {
+    try { return localStorage.getItem(PW_KEY); } catch (e) { return null; }
+  }
+  function ms_since(storage, key) {
+    var v = 0;
+    try { v = Number(storage.getItem(key)) || 0; } catch (e) { /* ignore */ }
+    return Date.now() - v;
+  }
+  function stamp(storage, key) {
+    try { storage.setItem(key, String(Date.now())); } catch (e) { /* ignore */ }
+  }
+  // Was somebody logged in on THIS tab until a moment ago? Then the login form means "Logout".
+  // (A new tab has no such history, so there the saved password is used.)
+  function just_logged_out() {
+    return ms_since(sessionStorage, SEEN_KEY) < 10000 || ms_since(localStorage, LOGOUT_KEY) < 10000;
   }
 
-  async function get_pw_hash(store) {
-    var existing = stored_hash();
-    if (existing) return existing;
-    var pw = prompt(store ? "Router password (its SHA256 hash will be saved in localStorage):" : "Router password:");
-    if (!pw) return null;
-    var h = await sha256Hex(pw);
-    if (store) {
-      try { localStorage.setItem(CFG.pw_storage_key, h); } catch (e) {}
+  async function ask_pw_hash() {
+    var pw = prompt("Router password:");
+    return pw ? sha256Hex(pw) : null;
+  }
+
+  // One login to the router with the saved password. Returns "ok", "rejected" or "error".
+  async function router_login(pw_hash) {
+    var saltRes = await ubus({ service: "zwrt_web", method: "web_login_info" }, { session: ZERO_SID });
+    var sault = saltRes && saltRes.data && saltRes.data.zte_web_sault;
+    if (!sault) return "error";
+    var finalHash = await sha256Hex(pw_hash + sault);
+    var r = await ubus({ service: "zwrt_web", method: "web_login", params: { password: finalHash } }, { session: ZERO_SID });
+    var d = r && r.data;
+    console.log("[ZTE] auto login answer: result=" + (d ? d.result : "none"));
+    if (d && (d.result === 0 || d.result === "0") && d.ubus_rpc_session) {
+      sessionStorage.setItem("ct", d.ubus_rpc_session);
+      return "ok";
     }
-    return h;
+    return d && d.result !== undefined ? "rejected" : "error";
   }
 
   async function check_login() {
@@ -378,60 +413,63 @@
     }
   }
 
-  async function ubus_login(type, pw_hash) {
-    var sid = type === "web_login" ? ZERO_SID : sessionStorage.getItem("ct") || ZERO_SID;
+  // Developer-options login, made inside the session the router's page already has.
+  // (This is not a login to the router: it creates no new session.)
+  async function developer_option_login(pw_hash) {
+    var sid = sessionStorage.getItem("ct") || ZERO_SID;
     var saltRes = await ubus({ service: "zwrt_web", method: "web_login_info" }, { session: sid });
     var sault = saltRes && saltRes.data && saltRes.data.zte_web_sault;
     if (!sault) throw new Error("could not retrieve salt");
     var finalHash = await sha256Hex(pw_hash + sault);
-    var r = await ubus({ service: "zwrt_web", method: type, params: { password: finalHash } }, { session: sid });
+    var r = await ubus({ service: "zwrt_web", method: "web_developer_option_login", params: { password: finalHash } }, { session: sid });
     var d = r && r.data;
-    if (d && (d.result === 0 || d.result === "0")) {
-      if (type === "web_login" && d.ubus_rpc_session) sessionStorage.setItem("ct", d.ubus_rpc_session);
-      return true;
-    }
-    return false;
+    return !!(d && (d.result === 0 || d.result === "0"));
   }
 
-  window.zte_login = async function (store) {
-    var h = await get_pw_hash(!!store);
-    if (!h) return false;
-    try {
-      var ok = await ubus_login("web_login", h);
-      if (ok) toast("Logged in ✓", "ok");
-      else toast("Login failed — wrong password?\nUse 'Forget Password' if the saved one changed.", "error");
-      return ok;
-    } catch (e) {
-      toast("Login failed: " + e.message, "error");
-      return false;
-    }
-  };
-
   window.zte_developer_login = async function () {
-    var h = await get_pw_hash(false);
+    var h = saved_hash() || (await ask_pw_hash());
     if (!h) return;
     try {
-      var ok = await ubus_login("web_developer_option_login", h);
+      var ok = await developer_option_login(h);
       toast(ok ? "Developer session active ✓" : "Developer login failed", ok ? "ok" : "error");
     } catch (e) {
       toast("Developer login failed: " + e.message, "error");
     }
   };
 
-  window.zte_enable_auto_login = async function () {
-    if (!confirm("Save your router password as a SHA256 hash in localStorage for automatic login?\n\n" +
-      "Note: anyone with access to this browser profile can log in with that hash."))
-      return;
-    try { localStorage.removeItem(CFG.pw_storage_key); } catch (e) {}
-    var ok = await window.zte_login(true);
-    if (ok) toast("Password saved — auto login enabled", "ok");
-    else { try { localStorage.removeItem(CFG.pw_storage_key); } catch (e) {} }
+  window.zte_enable_auto_login = function () {
+    var ov = show_modal("Auto Login",
+      '<div class="zte_sec" style="font-size:12px;line-height:1.5;">' +
+      "Save the router password so that the panel logs in by itself when you open the router page.<br>" +
+      '<span style="color:#78909C;">It is stored in this browser as a SHA256 hash. Anyone who can use this browser profile ' +
+      "can log in to the router with it. Nothing is changed right now; it is used the next time the page is opened.</span>" +
+      '<div style="display:flex;gap:6px;margin-top:10px;">' +
+      '<input type="password" id="zte_pw_in" placeholder="router password" autocomplete="off" ' +
+      'style="flex:1;min-width:0;padding:6px 9px;border:1px solid #B0BEC5;border-radius:6px;font-size:12px;background:#fff;color:#37474F;">' +
+      '<button class="zte_btn ok" id="zte_pw_save">Save</button></div></div>');
+    var inp = ov.querySelector("#zte_pw_in");
+    async function save() {
+      if (!inp.value) { toast("Type the router password first", "warn"); return; }
+      var h = await sha256Hex(inp.value);
+      try { localStorage.setItem(PW_KEY, h); } catch (e) { /* ignore */ }
+      ov.remove();
+      update_login_state();
+      toast("Password saved.\nIt is used the next time you open the router page.", "ok");
+    }
+    ov.querySelector("#zte_pw_save").onclick = save;
+    inp.addEventListener("keydown", function (e) { if (e.key === "Enter") save(); });
+    inp.focus();
   };
 
   window.zte_forget_password = function () {
-    try { localStorage.removeItem(CFG.pw_storage_key); } catch (e) {}
+    try { localStorage.removeItem(PW_KEY); } catch (e) { /* ignore */ }
+    update_login_state();
     toast("Saved password removed", "info");
   };
+
+  function update_login_state() {
+    zset("zte_autologin_state", saved_hash() ? "on (password saved)" : "off");
+  }
 
   // ─────────────────────────────────────────────
   //  FREQUENCY CONVERSION (from ZTE-Script-NG)
@@ -1116,8 +1154,9 @@
 
   // The router's built-in scan disconnects mobile data and leaves it off → turn it back on
   async function restore_data_after_scan(before) {
-    if (!(await check_login()) && stored_hash()) {
-      try { await ubus_login("web_login", stored_hash()); } catch (e) { /* ignore */ }
+    if (!(await check_login())) {
+      toast("The router ended the session during the scan, so the panel could not check mobile data.\nLog in again; if you are offline, press 🔀 Reconnect data.", "warn", 12000);
+      return;
     }
     var now = await get_wwan();
     if (!now) {
@@ -1180,9 +1219,8 @@
         ], { quiet: true });
         if (res[0].accessDenied && res[1].accessDenied && !(await check_login())) {
           // the router dropped the web session during the scan
-          var back = false;
-          if (stored_hash()) { try { back = await ubus_login("web_login", stored_hash()); } catch (e) { /* ignore */ } }
-          if (!back) { loggedOut = true; break; }
+          loggedOut = true;
+          break;
         } else if (res[0].success || res[1].success) {
           S.nbr_raw = { lte: res[0].data, nr: res[1].data };
           S.nbr = nbr_rows(res[0].data, "LTE").concat(nbr_rows(res[1].data, "NR"))
@@ -1935,7 +1973,7 @@
   // (the first poll, every CFG.slowPollEvery-th poll, and after every action).
   async function poll_once(fastOnly) {
     try {
-      var res = await ubusRetry(fastOnly ? POLL_FAST : POLL_FAST.concat(POLL_SLOW), { quiet: true });
+      var res = await ubusRetry(fastOnly ? POLL_FAST : POLL_FAST.concat(POLL_SLOW), { quiet: true }, 2);
       if (res[0].success) S.net = res[0].data || {};
       if (res[1].success) S.traffic = res[1].data || {};
       if (!fastOnly) {
@@ -1946,11 +1984,10 @@
 
       if (res.every(function (r) { return r.accessDenied; })) {
         set_dot("error");
-        await handle_session_lost();
+        if (!(await check_login())) { S.session_lost = true; S.lost_checks = 0; }
         return;
       }
-      S.denied_streak = 0;
-      S.expired_warned = false;
+      stamp(sessionStorage, SEEN_KEY);
       set_dot(res.every(function (r) { return r.success; }) ? "ok" : "warn");
       update_ui();
     } catch (e) {
@@ -1958,35 +1995,36 @@
     }
   }
 
+  // While nobody is logged in, the panel stays out of the router's way: no polling, only one
+  // small check every CFG.loginWaitInterval. It never logs in again by itself (a new login
+  // would replace the session the router's own page is using), and after a login it waits
+  // for the router's page to finish loading before it starts polling again.
+  async function wait_for_session() {
+    if (await check_login()) {
+      await wait_page_settled();
+      console.log("[ZTE] session is back — polling resumed");
+      if (S.expired_warned) toast("Logged in again — panel resumed", "ok");
+      S.session_lost = false;
+      S.expired_warned = false;
+      S.poll_tick = 0;
+      return;
+    }
+    S.lost_checks++;
+    if (S.lost_checks === 2 && !S.expired_warned) {
+      S.expired_warned = true;
+      console.log("[ZTE] session ended " + Math.round((Date.now() - S.started_at) / 1000) + " s after the panel started");
+      toast("Router session ended — log in again on the router page.", "warn");
+    }
+  }
+
   async function poll_loop() {
-    if (!S.pause_poll) {
+    if (S.session_lost) {
+      await wait_for_session();
+    } else if (!S.pause_poll) {
       await poll_once(S.poll_tick % CFG.slowPollEvery !== 0);
       S.poll_tick++;
     }
-    S.poll_timer = setTimeout(poll_loop, CFG.pollInterval);
-  }
-
-  async function handle_session_lost() {
-    S.denied_streak++;
-    if (S.denied_streak < 3 || S.relogin_running) return;
-    if (await check_login()) { S.denied_streak = 0; return; }
-    // Try a silent re-login with the saved hash, at most every 30 s
-    if (stored_hash() && Date.now() - S.last_relogin > 30000) {
-      S.relogin_running = true;
-      S.last_relogin = Date.now();
-      try {
-        if (await ubus_login("web_login", stored_hash())) {
-          toast("Session expired — logged in again ✓", "ok");
-          S.denied_streak = 0;
-        }
-      } catch (e) { /* ignore */ }
-      S.relogin_running = false;
-      return;
-    }
-    if (!S.expired_warned) {
-      S.expired_warned = true;
-      toast("Router session expired — log in again (or use 🔑 Auto Login)", "warn");
-    }
+    S.poll_timer = setTimeout(poll_loop, S.session_lost ? CFG.loginWaitInterval : CFG.pollInterval);
   }
 
   // ─────────────────────────────────────────────
@@ -2457,6 +2495,7 @@
       '<div class="zte_sec"><div class="zte_sec_title">Advanced</div><div class="zte_btn_grid">' +
       btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
       btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
       '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
@@ -2678,8 +2717,22 @@
   // ─────────────────────────────────────────────
   function start_panel() {
     if (S.init_done) return;
+    if (zel("zte_panel")) { // an older copy without the guard below got there first
+      toast("Another ZTE panel script is already running on this page.\nKeep only one enabled in your userscript manager.", "warn");
+      return;
+    }
     S.init_done = true;
+    S.started_at = Date.now();
+    try { sessionStorage.removeItem(TRIED_KEY); } catch (e) { /* ignore */ } // logged in: an automatic login, if any, worked
+    stamp(sessionStorage, SEEN_KEY);
     inject_html();
+    update_login_state();
+    // Leaving the page with the session token already removed = the Logout button was used
+    window.addEventListener("beforeunload", function () {
+      var ct = null;
+      try { ct = sessionStorage.getItem("ct"); } catch (e) { /* ignore */ }
+      if (!ct) stamp(localStorage, LOGOUT_KEY);
+    });
     poll_loop();
     try { localStorage.removeItem("ZtePanelGpsSource"); } catch (e) {} // left over from older versions
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
@@ -2703,26 +2756,49 @@
   }
 
   async function bootstrap() {
-    await wait_page_settled();
+    // Only one copy may run on a page (Full and Lite together, or an old and a new install)
+    if (window.__ztePanelNG) {
+      toast("Another ZTE panel script (v" + window.__ztePanelNG + ") is already running on this page.\nKeep only one enabled in your userscript manager.", "warn", 12000);
+      return;
+    }
+    window.__ztePanelNG = CFG.version;
     console.log("[ZTE] Panel NG v" + CFG.version + " loaded (ubus API)");
 
+    // Versions up to ng1.23 kept the password hash under this name
+    try { localStorage.removeItem("ScriptPasswordHash"); } catch (e) { /* ignore */ }
+
+    // Let the router's own page load first.
+    await wait_page_settled();
     if (await check_login()) return start_panel();
 
-    // Saved password → try one silent login
-    if (stored_hash()) {
-      try {
-        if (await ubus_login("web_login", stored_hash())) {
-          console.log("[ZTE] Auto login OK");
-          return start_panel();
+    // Nobody is logged in. Use the saved password — once, and only on a page that was just opened.
+    if (saved_hash()) {
+      if (just_logged_out()) {
+        toast("Logged out. Auto login is skipped right after a logout —\nreload the page to log in automatically.", "info", 8000);
+      } else if (ms_since(sessionStorage, TRIED_KEY) < 60000) {
+        // The page was reloaded after an automatic login and is still logged out: do not try again
+        toast("Auto login was just tried and the router page is still logged out.\nLog in on the router page.", "warn", 10000);
+      } else {
+        stamp(sessionStorage, TRIED_KEY);
+        var result = "error";
+        try { result = await router_login(saved_hash()); } catch (e) { console.warn("[ZTE] Auto login error:", e.message); }
+        if (result === "ok") {
+          // Reload once, so that the router's own page starts up with this session
+          toast("Logged in with the saved password — reloading…", "ok", 3000);
+          if (/login/i.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
+          location.reload();
+          return;
         }
-        console.warn("[ZTE] Auto login failed — waiting for manual login");
-      } catch (e) {
-        console.warn("[ZTE] Auto login error:", e.message);
+        if (result === "rejected") {
+          try { localStorage.removeItem(PW_KEY); } catch (e) { /* ignore */ }
+          toast("Auto login failed — the router rejected the saved password, so it was removed.\nLog in on the router page, then save it again with 🔑 Auto Login.", "error", 15000);
+        } else {
+          toast("Auto login did not go through. Log in on the router page.", "warn", 10000);
+        }
       }
     }
 
-    // Otherwise wait until the user logs in through the router UI
-    console.log("[ZTE] Waiting for login...");
+    // Wait until somebody logs in on the router page.
     var busy = false;
     var t = setInterval(async function () {
       if (busy) return;

@@ -190,6 +190,7 @@ rep(
       '<div class="zte_sec"><div class="zte_sec_title">Advanced</div><div class="zte_btn_grid">' +
       btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
       btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
       '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
@@ -203,6 +204,7 @@ rep(
       '<div class="zte_sec"><div class="zte_sec_title">Login &amp; Tools</div><div class="zte_btn_grid">' +
       btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
       btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
       "</div></div>" +
