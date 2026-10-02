@@ -58,7 +58,7 @@ SOFTWARE.
 
 ## Acknowledgements
 
-The ubus calls for the neighbor scan, mobile data on/off, DNS, APN and resetting locks were found with the help of these projects' research on the ZTE U60 Pro. Only the call and parameter names were used; no code from them is included.
+The ubus calls for the neighbor scan, mobile data on/off, DNS, APN, ARP proxy and resetting locks were found with the help of these projects' research on the ZTE U60 Pro. Only the call and parameter names were used; no code from them is included.
 
 - open-u60-pro, Copyright (c) 2025-present Jesther Silvestre — <https://github.com/jesther-ai/open-u60-pro> (MIT)
 - zte-u60-pro-mu5250-manager, by faying, based on open-u60-pro — <https://github.com/faying/zte-u60-pro-mu5250-manager> (MIT)

@@ -193,6 +193,8 @@ rep(
       '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
+      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
+      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
       '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
       btn("🔍 Search recorded calls…", "window.zte_rec_search()", "full") +
       '<div id="zte_rec_count" style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">0 calls recorded</div>' +
@@ -207,6 +209,8 @@ rep(
       '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
+      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
+      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
       "</div></div>" +
 ''',
 )

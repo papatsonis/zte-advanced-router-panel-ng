@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.25
+// @version      2026-ng1.27
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, neighbor scan, bridge mode, DNS, APN, traffic stats, GPS. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.25",
+    version: "2026-ng1.27",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -1193,6 +1193,56 @@
     if (S.wan.opms_wan_mode === target) toast(OP_MODES[target] + " mode active ✓", "ok");
   };
 
+  // ── ARP proxy ──
+  // The old firmware had this as the hidden goform ARP_PROXY_SWITCH. On the newer firmware:
+  //   zwrt_router.api / router_set_arp_proxy { arp_proxy_enable: 1 | 0 }   (a number, not text)
+  // The method name is in the list that open-u60-pro recorded on a ZTE U60 Pro; the parameter
+  // was found by testing on an MC7530 (it is not used by the router's own web UI).
+  // The router accepts the call only in a developer session.
+  // Current state: uci zwrt_router / section "network" / arp_proxy_enable ("1" | "0"); the option
+  // is missing until the switch has been used once.
+  async function update_arp_state() {
+    var state = null;
+    try {
+      var r = await ubus({ service: "uci", method: "get", params: { config: "zwrt_router", section: "network" } }, { quiet: true });
+      var v = r.success && r.data && r.data.values;
+      if (v) {
+        var raw = v.arp_proxy_enable !== undefined ? v.arp_proxy_enable : v.network && v.network.arp_proxy_enable;
+        state = raw === undefined ? "off (never set)" : String(raw) === "1" ? "on" : "off";
+      }
+    } catch (e) { /* leave unknown */ }
+    zset("zte_arp_state", state || "—");
+    return state;
+  }
+
+  window.zte_arp_proxy = async function (enable) {
+    var word = enable ? "ON" : "OFF";
+    if (!confirm("Switch ARP proxy " + word + "?\n\n• It needs a developer session: the panel asks for the router password if none is saved.\n" +
+      "• If nothing changes on your network afterwards, reboot the router.")) return;
+    var call = { service: "zwrt_router.api", method: "router_set_arp_proxy", params: { arp_proxy_enable: enable ? 1 : 0 } };
+    var r;
+    try {
+      r = await ubus(call, { quiet: true });
+      if (r.accessDenied) { // not in a developer session yet
+        var h = saved_hash() || (await ask_pw_hash());
+        if (!h) return;
+        if (!(await developer_option_login(h))) { toast("Developer login failed — ARP proxy not changed.", "error"); return; }
+        r = await ubus(call);
+      }
+    } catch (e) {
+      toast("ARP proxy: no answer from the router (" + e.message + ")", "error");
+      return;
+    }
+    if (!r.success) {
+      toast(r.accessDenied ? "The router refused the ARP proxy call, even in a developer session." : "ARP proxy change failed (" + (r.error || "?") + ")", "error");
+      return;
+    }
+    await sleep(1000);
+    var now = await update_arp_state();
+    if (now === (enable ? "on" : "off")) toast("ARP proxy is " + word + " ✓\nIf nothing changes on your network, reboot the router.", "ok", 8000);
+    else toast("The router accepted the call, but the setting reads “" + (now || "unknown") + "”.", "warn", 8000);
+  };
+
   // ── GPS ──
   // Exactly what the router's own Device details page does (service_rpc.js):
   //   zwrt_gnss / get_location_info {}  →  gnss_lat, gnss_lon
@@ -1709,6 +1759,169 @@
   };
 
   // ─────────────────────────────────────────────
+  //  HIDDEN MENUS (the router's own web UI)
+  //  The web UI keeps more than it shows:
+  //   1. left-menu entries that are hidden (class "hide", or switched off by the UI itself),
+  //   2. parts of a page hidden with class "hide",
+  //   3. pages that have an address (#hash) but no menu entry at all.
+  //  With "Hidden Menus" on, 1 and 2 are shown with a dashed outline; "Hidden pages" lists 3.
+  //  Only what the UI can open in the current operation mode is shown: its page list comes
+  //  from the UI's own modules (config/menu and config/<device>/menu_*).
+  //  Nothing here talks to the router — it only changes what the page displays.
+  // ─────────────────────────────────────────────
+  var HIDDEN_KEY = "ZtePanelHiddenMenus"; // localStorage: "1" = on
+  var HIDDEN_SKIP = ["#login", "#home", "#change_password", "#privacy_policy", "#developer_options_login", "#check_license"];
+
+  function hidden_on() {
+    try { return localStorage.getItem(HIDDEN_KEY) === "1"; } catch (e) { return false; }
+  }
+
+  // The web UI's modules (require.js registry), or null on a page built differently
+  function ui_modules() {
+    try {
+      var rq = window.requirejs || window.require;
+      return (rq && rq.s && rq.s.contexts && rq.s.contexts._ && rq.s.contexts._.defined) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Can the web UI open this address right now (in this operation mode, logged in)?
+  function ui_can_open(hash) {
+    try {
+      var mods = ui_modules(), menu = mods && mods["config/menu"];
+      if (!menu || typeof menu.findMenu !== "function") return null; // unknown
+      return menu.findMenu(hash).length > 0;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Every page the web UI can open in the current operation mode: [{ hash, path }]
+  function ui_pages() {
+    var mods = ui_modules(), out = [], seen = {};
+    if (!mods) return out;
+    Object.keys(mods).forEach(function (k) {
+      var v = mods[k];
+      if (!/(^|\/)menu(_\w+)?$/.test(k) || !Array.isArray(v)) return;
+      v.forEach(function (e) {
+        if (!e || typeof e.hash !== "string" || seen[e.hash]) return;
+        if (ui_can_open(e.hash) === false) return;
+        seen[e.hash] = true;
+        out.push({ hash: e.hash, path: String(e.path || "") });
+      });
+    });
+    return out;
+  }
+
+  function in_panel(el) {
+    return !!el.closest("#zte_panel,#zte_modal");
+  }
+
+  // A hidden menu entry is worth showing only if one of its links leads somewhere
+  function menu_entry_opens(li) {
+    var links = li.querySelectorAll("a[href^='#']"), any = false, known = false;
+    for (var i = 0; i < links.length; i++) {
+      var h = links[i].getAttribute("href");
+      if (h.length < 2) continue;
+      var can = ui_can_open(h);
+      if (can !== null) known = true;
+      if (can) any = true;
+    }
+    return any || !known; // page list unknown → show it, like the old panel did
+  }
+
+  function apply_hidden_menus() {
+    if (!hidden_on()) return;
+    var shown = 0;
+    function reveal(el, how) {
+      if (how === "class") el.classList.remove("hide"); else el.style.display = "";
+      el.dataset.zteUnhidden = how;
+      el.classList.add("zte_unhidden");
+      el.title = "Hidden by the router's web interface (shown by ZTE Panel NG)";
+      shown++;
+    }
+    // 1. left menu (the UI's own logic may hide an entry again, so entries shown before are re-checked)
+    document.querySelectorAll("#leftMenu li, #sidebarMenu li").forEach(function (li) {
+      if (in_panel(li)) return;
+      var byClass = li.classList.contains("hide"), byStyle = li.style.display === "none";
+      if (!byClass && !byStyle) return;
+      if (!menu_entry_opens(li)) return;
+      reveal(li, byClass ? "class" : "style");
+    });
+    // 2. page content (never dialogs or alerts: those are hidden for a reason)
+    document.querySelectorAll("#container .hide").forEach(function (el) {
+      if (in_panel(el) || el.closest(".modal,.alert")) return;
+      reveal(el, "class");
+    });
+    return shown;
+  }
+
+  function undo_hidden_menus() {
+    document.querySelectorAll("[data-zte-unhidden]").forEach(function (el) {
+      if (el.dataset.zteUnhidden === "class") el.classList.add("hide"); else el.style.display = "none";
+      el.classList.remove("zte_unhidden");
+      el.removeAttribute("title");
+      delete el.dataset.zteUnhidden;
+    });
+  }
+
+  function update_hidden_btn() {
+    var b = zel("zte_hidden_btn");
+    if (!b) return;
+    var on = hidden_on();
+    b.className = "zte_btn" + (on ? " ok" : "");
+    b.textContent = on ? "👁 Hidden Menus: ON" : "👁 Hidden Menus: OFF";
+  }
+
+  window.zte_hidden_toggle = function () {
+    var on = !hidden_on();
+    try { if (on) localStorage.setItem(HIDDEN_KEY, "1"); else localStorage.removeItem(HIDDEN_KEY); } catch (e) { /* ignore */ }
+    update_hidden_btn();
+    if (on) {
+      var n = apply_hidden_menus();
+      toast("Hidden menus: ON" + (n ? " — " + n + " hidden item(s) shown on this page (dashed outline)" : " — nothing hidden on this page"), "ok");
+    } else {
+      undo_hidden_menus();
+      toast("Hidden menus: OFF", "info");
+    }
+  };
+
+  // Pages the web UI can open but has no menu entry for
+  window.zte_hidden_pages = function () {
+    var pages = ui_pages().filter(function (p) {
+      if (HIDDEN_SKIP.indexOf(p.hash) !== -1) return false;
+      var links = document.querySelectorAll('a[href="' + p.hash + '"]');
+      for (var i = 0; i < links.length; i++) if (!in_panel(links[i])) return false;
+      return true;
+    });
+    var html = pages.length
+      ? '<div class="zte_sec" style="font-size:11px;color:#78909C;line-height:1.5;">Pages the router\'s web interface has, but does not link from its menu ' +
+        "(in the current operation mode). Some belong to features this model does not have and stay empty; " +
+        "some ask for a developer login or a licence first.</div>" +
+        '<div class="zte_sec"><div class="zte_btn_grid">' +
+        pages.map(function (p) {
+          return '<button class="zte_btn" data-hash="' + esc(p.hash) + '" title="' + esc(p.path) + '">' + esc(p.hash.slice(1)) + "</button>";
+        }).join("") + "</div></div>"
+      : '<div class="zte_sec" style="font-size:12px;color:#78909C;">No hidden pages found — the page list of the router\'s web interface could not be read on this firmware.</div>';
+    var ov = show_modal("Hidden pages", html);
+    ov.querySelectorAll("button[data-hash]").forEach(function (b) {
+      b.onclick = function () { ov.remove(); location.hash = b.getAttribute("data-hash"); };
+    });
+  };
+
+  function start_hidden_menus() {
+    update_hidden_btn();
+    // The web UI redraws its page on every address change, and its menu logic can hide entries again
+    window.addEventListener("hashchange", function () {
+      setTimeout(apply_hidden_menus, 600);
+      setTimeout(apply_hidden_menus, 1500);
+    });
+    setInterval(apply_hidden_menus, 2000);
+    apply_hidden_menus();
+  }
+
+  // ─────────────────────────────────────────────
   //  FORMAT HELPERS
   // ─────────────────────────────────────────────
   function fmt_bytes(v) {
@@ -2038,6 +2251,7 @@
       "background:#FFFFFF;color:#37474F;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.15);",
       'font-family:"Segoe UI",Verdana,sans-serif;font-size:12px;border:1px solid #B0BEC5;display:flex;flex-direction:column;}',
       "#zte_panel *,#zte_modal *{box-sizing:border-box;}",
+      ".zte_unhidden{outline:1px dashed #F9A825 !important;outline-offset:-1px;}",
       "#zte_hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;",
       "background:linear-gradient(135deg,#1976D2,#1565C0);border-radius:12px 12px 0 0;cursor:move;user-select:none;flex-shrink:0;}",
       "#zte_hdr h2{margin:0;font-size:13px;font-weight:700;color:#FFFFFF;letter-spacing:.5px;}",
@@ -2164,6 +2378,9 @@
       btn("🌉 Bridge mode ON", "window.zte_bridge_mode(true)", "warn") +
       btn("📶 Router mode (bridge OFF)", "window.zte_bridge_mode(false)") +
       '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Operation mode: <b id="zte_opmode">—</b></div>' +
+      btn("🧩 ARP Proxy ON", "window.zte_arp_proxy(true)") +
+      btn("🧩 ARP Proxy OFF", "window.zte_arp_proxy(false)", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">ARP proxy: <b id="zte_arp_state">—</b></div>' +
       btn("🔄 Reboot Router", "window.zte_reboot()", "danger full") +
       "</div></div>" +
       // ── NETWORK MODE ──
@@ -2260,6 +2477,8 @@
       '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
       btn("🛠 Developer Login", "window.zte_developer_login()") +
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
+      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
+      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
       "</div></div>" +
       // ── TIP ──
       (CFG.bmac
@@ -2341,6 +2560,8 @@
     });
     poll_loop();
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
+    setTimeout(update_arp_state, 8000); // one read; afterwards only when the ARP proxy is switched
+    start_hidden_menus();
     toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");
   }
 

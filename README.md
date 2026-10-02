@@ -34,14 +34,14 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 | **Network** | Provider, network type, active bands, total bandwidth, LTE and 5G carrier aggregation, eNodeB / gNodeB, cell IDs, WAN IP, temperature, session time with a countdown to the next IP renewal |
 | **LTE / 5G signal** | One card per carrier: RSRP, RSRQ, SINR, RSSI, (E)ARFCN, PCI, bandwidth, frequency |
 | **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
-| **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, reboot |
+| **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, ARP proxy on/off, reboot |
 | **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
 | **LTE bands / 5G bands** | One-click band locks with live status. A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
 | **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks |
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
 | **Device info** | CPU temperature and load, memory, uptime, WAN details, GPS position with a map link, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
 | **WiFi** | Radio info, transmit power, country |
-| **Login & tools** | Optional auto login, developer login, copy a signal report |
+| **Login & tools** | Optional auto login, developer login, copy a signal report, hidden menus and hidden pages of the router's own web interface |
 
 **Full edition only:** API finder (searches the router's own web code for a keyword), call recorder (logs the calls the router's pages make), custom ubus call, raw netinfo dump, raw scan data, 5G NSA lock probe.
 
@@ -57,6 +57,8 @@ Tested on a **ZTE MC7530**. The basic calls come from ZTE-Script-NG, which was w
 - **Band and cell locks stay in place** until you remove them. "Remove band lock" works by locking to the list of all bands in the `CFG` block — adjust that list to your model.
 - **Locking to a cell of another operator** leaves the router without service until you unlock it. A cell lock takes effect after you switch network mode or reboot.
 - **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable.
+- **ARP proxy** is a hidden setting of the firmware. The router accepts the switch only in a developer session, so the panel asks for the router password if none is saved. The panel shows the stored setting; if nothing changes on your network after switching, reboot the router.
+- **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline), and **Hidden pages** lists pages it has but does not link. Both only change what the page displays. Some of these belong to features your model does not have, so a page may be empty or its settings may do nothing.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
 
 This project is not affiliated with ZTE. Use it at your own risk.
@@ -99,7 +101,7 @@ This panel exists because of other people's work:
 
 - **[Cerix](https://github.com/Cerix/zte-advanced-router-panel)** — *ZTE Advanced Router Panel* (MIT). The panel's design, layout and feature set come from it. Tips: [buymeacoffee.com/cerix](https://buymeacoffee.com/cerix)
 - **[Thomas Pöchtrager](https://github.com/tpoechtrager/ZTE-Web-Script)** — *ZTE-Script-NG* (AGPLv3+). The ubus calls, login flow, signal parsing and frequency tables come from it. Tips: PayPal `t.poechtrager@gmail.com`
-- **[open-u60-pro](https://github.com/jesther-ai/open-u60-pro)** by Jesther Silvestre and **[zte-u60-pro-mu5250-manager](https://github.com/faying/zte-u60-pro-mu5250-manager)** by faying (both MIT) — their research on the ZTE U60 Pro showed which ubus calls exist for the neighbor scan, mobile data on/off, DNS, APN and resetting locks. Only the call and parameter names were used; no code from them is included.
+- **[open-u60-pro](https://github.com/jesther-ai/open-u60-pro)** by Jesther Silvestre and **[zte-u60-pro-mu5250-manager](https://github.com/faying/zte-u60-pro-mu5250-manager)** by faying (both MIT) — their research on the ZTE U60 Pro showed which ubus calls exist for the neighbor scan, mobile data on/off, DNS, APN, ARP proxy and resetting locks. Only the call and parameter names were used; no code from them is included.
 
 This version is a separate, modified work. It is not maintained or endorsed by the original authors, so please report problems [here](https://github.com/papatsonis/zte-advanced-router-panel-ng/issues) and not to them.
 
