@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.28
+// @version      2026-ng1.29
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.28",
+    version: "2026-ng1.29",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -2391,7 +2391,11 @@
         if ((v = uci_values(res[6]))) S.ant_en = v;
       }
 
-      if (res.every(function (r) { return r.accessDenied; })) {
+      // Logged out? Some firmware (MC7530) answers netinfo without a login, so that call
+      // says nothing: look at the others. check_login() below confirms it before the panel pauses.
+      var rest = res.length > 1 ? res.slice(1) : res;
+      var denied = rest.some(function (r) { return r.accessDenied; }) && rest.every(function (r) { return !r.success; });
+      if (denied) {
         set_dot("error");
         if (!(await check_login())) { S.session_lost = true; S.lost_checks = 0; }
         return;
@@ -3042,7 +3046,14 @@
 
     // Let the router's own page load first.
     await wait_page_settled();
-    if (await check_login()) return start_panel();
+    var logged_in = await check_login();
+    // Right after an automatic login the router may answer "Access denied" once although the
+    // login worked (it does that now and then). Ask a few more times before giving up.
+    for (var n = 0; !logged_in && n < 4 && ms_since(sessionStorage, TRIED_KEY) < 60000; n++) {
+      await new Promise(function (r) { setTimeout(r, 700); });
+      logged_in = await check_login();
+    }
+    if (logged_in) return start_panel();
 
     // Nobody is logged in. Use the saved password — once, and only on a page that was just opened.
     if (saved_hash()) {
