@@ -116,10 +116,12 @@ rep(
     '''          var sv = String(lat);
           console.log("[ZTE] GPS: position is encoded — length " + sv.length + ", " +
             (/^[0-9a-f]+$/i.test(sv) ? "hex" : /^[A-Za-z0-9+\\/=]+$/.test(sv) ? "base64-like" : "other format"));
+          S.gps = { state: "encoded" }; // only an encrypted value the panel could not decode
           render_gps(null, null, "encoded by the router (cannot decode)");
           say("The router returns the position in an encoded form — tell me what the console (F12) line '[ZTE] GPS:' says.", "warn");
 ''',
-    '''          render_gps(null, null, "not readable on this router");
+    '''          S.gps = { state: "encoded" }; // only an encrypted value the panel could not decode
+          render_gps(null, null, "not readable on this router");
           say("This router returns the GPS position in a form the panel cannot read.", "warn");
 ''',
 )
@@ -177,12 +179,10 @@ rep(
 rep(
     '''      btn("✉ SMS Storage", "window.zte_wms_info()") +
       btn("🧾 Raw netinfo", "window.zte_dump_netinfo()") +
-      btn("📡 APN", "window.zte_apn_info()") +
-      btn("🛰 Refresh GPS", "window.zte_gps_refresh()") +
+      btn("📡 APN", "window.zte_apn_info()", "full") +
 ''',
     '''      btn("✉ SMS Storage", "window.zte_wms_info()") +
       btn("📡 APN", "window.zte_apn_info()") +
-      btn("🛰 Refresh GPS", "window.zte_gps_refresh()", "full") +
 ''',
 )
 rep(

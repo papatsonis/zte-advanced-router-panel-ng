@@ -33,21 +33,24 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 |---|---|
 | **Network** | Provider, network type, active bands, total bandwidth, LTE and 5G carrier aggregation, eNodeB / gNodeB, cell IDs, WAN IP, temperature, session time with a countdown to the next IP renewal |
 | **LTE / 5G signal** | One card per carrier: RSRP, RSRQ, SINR, RSSI, (E)ARFCN, PCI, bandwidth, frequency |
+| **ODU antenna selection** | Automatic, directional (front), directional wide beam (rear) or omnidirectional. The options and their names are read from the router's own Developer options page. Shown only on models that have this setting |
 | **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
 | **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, ARP proxy on/off, reboot |
 | **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
 | **LTE bands / 5G bands** | One-click band locks with live status. A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
 | **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks |
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
-| **Device info** | CPU temperature and load, memory, uptime, WAN details, GPS position with a map link, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
-| **WiFi** | Radio info, transmit power, country |
+| **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
+| **GPS** | Whether the router has GPS, and its position with a map link. Says "not available on this router" when it has none |
+| **WiFi** | Radio info, transmit power, country. Hidden on routers without WiFi (outdoor units such as the MC7530) |
+| **Hidden settings** | Session timeout (how long until the router logs you out) and temperature control. Each is shown only if the router supports it |
 | **Login & tools** | Optional auto login, developer login, copy a signal report, hidden menus and hidden pages of the router's own web interface |
 
 **Full edition only:** API finder (searches the router's own web code for a keyword), call recorder (logs the calls the router's pages make), custom ubus call, raw netinfo dump, raw scan data, 5G NSA lock probe.
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, GPS, WiFi, hidden settings) were also checked on an **MC8532B**. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
 
 ## Things to know before you click
 
@@ -60,6 +63,10 @@ Tested on a **ZTE MC7530**. The basic calls come from ZTE-Script-NG, which was w
 - **ARP proxy** is a hidden setting of the firmware. The router accepts the switch only in a developer session, so the panel asks for the router password if none is saved. The panel shows the stored setting; if nothing changes on your network after switching, reboot the router.
 - **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline), and **Hidden pages** lists pages it has but does not link. Both only change what the page displays. Some of these belong to features your model does not have, so a page may be empty or its settings may do nothing.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
+- **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic switching* in normal use. A change may ask for the router password (developer session) and lasts until the next reboot.
+- **Temperature control** is the firmware's protection against overheating; keep it on. If you turn it off, the router turns it back on after a restart.
+- **Session timeout** accepts 60–86400 seconds. Setting it is not offered by the router's own web interface; the panel uses the firmware's own call for it.
+- **Sections depend on the model.** The ODU antenna, WiFi and hidden-settings sections appear only when the router answers their calls, and GPS says "not available" on routers without it.
 
 This project is not affiliated with ZTE. Use it at your own risk.
 

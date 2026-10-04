@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.27
-// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, neighbor scan, bridge mode, DNS, APN, traffic stats, GPS. Lite edition without the developer tools.
+// @version      2026-ng1.28
+// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
 // @homepageURL  https://github.com/papatsonis/zte-advanced-router-panel-ng
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.27",
+    version: "2026-ng1.28",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -594,11 +594,14 @@
         if (p.length < 11) return;
         var a = parseInt(p[4], 10);
         var cv = nr_arfcn_to_mhz(a);
+        // A configured but inactive SCell reports the floor values -140/-43/-23/-120 = "not measured"
+        var unmeasured = num(p[7]) !== null && num(p[7]) <= -140;
         out.push({
           pci: parseInt(p[1], 10),
           arfcn: a,
           bandwidth: parseInt(p[5], 10),
-          rsrp: num(p[7]), rsrq: num(p[8]), sinr: num(p[9]), rssi: num(p[10]),
+          rsrp: unmeasured ? null : num(p[7]), rsrq: unmeasured ? null : num(p[8]),
+          sinr: unmeasured ? null : num(p[9]), rssi: unmeasured ? null : num(p[10]),
           ul: parseInt(p[0], 10) === 1,
           active: parseInt(p[2], 10) === 2,
           band: cv ? String(cv.band) : strip_n(p[3]),
@@ -1283,14 +1286,25 @@
     });
   }
 
+  // Every answer is also kept in S.gps, and a position seen once is kept as the last
+  // known one (S.gps_last), so the GNSS section can tell "has GPS" from "not available".
   function render_gps(lat, lon, msg) {
     ztoggle("zte_dev_gps_wrap", true);
+    if (msg && S.gps_last) { // no position now, but there was one earlier in this session
+      lat = S.gps_last.lat; lon = S.gps_last.lon;
+      zhtml("zte_dev_gps", row("Now", "no position — showing the last known one") + gps_rows(lat, lon));
+      return;
+    }
     if (msg) { zhtml("zte_dev_gps", row("Position", msg)); return; }
-    zhtml("zte_dev_gps",
+    zhtml("zte_dev_gps", gps_rows(lat, lon));
+  }
+  function gps_rows(lat, lon) {
+    return (
       row("Latitude", lat) + row("Longitude", lon) +
       '<div class="zte_row"><span class="zte_label">📍 Map</span><span class="zte_value">' +
       '<a href="https://www.google.com/maps?q=' + encodeURIComponent(lat + "," + lon) +
-      '" target="_blank" rel="noopener noreferrer" style="color:#1976D2;">Open in Maps</a></span></div>');
+      '" target="_blank" rel="noopener noreferrer" style="color:#1976D2;">Open in Maps</a></span></div>'
+    );
   }
 
   async function update_gps(manual) {
@@ -1301,6 +1315,7 @@
       var r = await ubusRetry(GPS_CALL, { quiet: true });
       if (!r.success) {
         var why = r.accessDenied ? "refused by the router" : "not available (" + (r.error || "?") + ")";
+        S.gps = { state: "error", err: "get_location_info " + (r.accessDenied ? "refused" : (r.error || "?")) };
         render_gps(null, null, why);
         say("GPS " + why, "error");
         return;
@@ -1314,26 +1329,403 @@
         if (info && gps_num(info.lat) !== null && gps_num(info.lon) !== null) {
           lat = info.lat; lon = info.lon; la = gps_num(lat); lo = gps_num(lon);
         } else {
+          S.gps = { state: "encoded" }; // only an encrypted value the panel could not decode
           render_gps(null, null, "not readable on this router");
           say("This router returns the GPS position in a form the panel cannot read.", "warn");
           return;
         }
       }
       if (la === null || lo === null || (la === 0 && lo === 0)) {
+        S.gps = { state: "nofix", err: "get_location_info: no coordinates" };
         render_gps(null, null, "no GPS fix right now");
         say("The router has no GPS fix right now — its own Device details page shows no position either. Try again later.", "warn");
         return;
       }
-      render_gps(String(lat).trim(), String(lon).trim());
+      S.gps = { state: "pos" };
+      S.gps_last = { lat: String(lat).trim(), lon: String(lon).trim() };
+      render_gps(S.gps_last.lat, S.gps_last.lon);
       say("GPS position updated ✓", "ok");
     } catch (e) {
+      S.gps = { state: "error", err: "get_location_info: " + e.message };
       render_gps(null, null, "not available");
       say("GPS request failed: " + e.message, "error");
     } finally {
       S.gps_busy = false;
+      S.gps_checked = true;
+      if (typeof render_gnss === "function") render_gnss();
     }
   }
   window.zte_gps_refresh = function () { return update_gps(true); };
+
+  // ─────────────────────────────────────────────
+  //  ODU ANTENNA, GPS
+  //  Read with "uci get" (read only), found on an MC7530:
+  //   zte_nwinfo / odu_as_mode     antenna selection: as_mode
+  //   zte_nwinfo / odu_as_enable   as_switch
+  //  The antenna selection is set the way the router's own Developer options page does it:
+  //   zte_nwinfo_api / nwinfo_set_odu_as_mode { odu_as_mode: "auto" | "front_directional" | "rear_directional" | "omni" }
+  //  These are read with the slow poll (every CFG.slowPollEvery seconds), not every second.
+  // ─────────────────────────────────────────────
+  var UCI_ANT = { service: "uci", method: "get", params: { config: "zte_nwinfo", section: "odu_as_mode" } };
+  var UCI_ANT_EN = { service: "uci", method: "get", params: { config: "zte_nwinfo", section: "odu_as_enable" } };
+
+  function uci_values(r) {
+    var v = r && r.success && r.data && r.data.values;
+    return v && typeof v === "object" ? v : null;
+  }
+
+  // ── ODU antenna selection ──
+  // The options and their names come from the router itself, so another model shows what its
+  // own firmware offers:
+  //   options: the <select data-bind="value: as_mode"> of its Developer options page
+  //            (/tmpl/auth/adm/developer_options.html) → value + data-trans key
+  //   names:   the page's own translations ($.i18n.prop), else its Messages_<lang>.properties
+  //   Front / Rear: taken from the value the router sends (front_directional → Front). On an
+  //            MC7530 the firmware's names alone hide this: "Directional Antenna" is
+  //            front_directional, "Directional Wide Beam Antenna" is rear_directional.
+  // If the page or the names cannot be read, the built-in list below (MC7530) is used.
+  var ANT_BUILTIN = [
+    { v: "auto", key: "ant_select_mode_auto", name: "Automatic switching" },
+    { v: "front_directional", key: "ant_select_mode_front_directional", name: "Directional Antenna" },
+    { v: "rear_directional", key: "ant_select_mode_rear_directional", name: "Directional Wide Beam Antenna" },
+    { v: "omni", key: "ant_select_mode_rear_omni", name: "Omnidirectional Antenna" },
+  ];
+  var ANT_MODES = ANT_BUILTIN.slice();
+  var ANT_SRC = { list: "built-in (MC7530)", names: "built-in" };
+
+  // Position from the value the router uses: "front_directional" → "Front"
+  function ant_pos(v) {
+    var w = String(v || "").split("_")[0].toLowerCase();
+    return { front: "Front", rear: "Rear", left: "Left", right: "Right", top: "Top", bottom: "Bottom", side: "Side" }[w] || "";
+  }
+  function ant_text(m) {
+    var pos = ant_pos(m.v);
+    return m.name + (pos && m.name.toLowerCase().indexOf(pos.toLowerCase()) < 0 ? " — " + pos : "");
+  }
+  function ant_label(v) {
+    for (var i = 0; i < ANT_MODES.length; i++) if (ANT_MODES[i].v === v) return ant_text(ANT_MODES[i]);
+    return v ? String(v) : "—";
+  }
+
+  function page_i18n(key) {
+    try {
+      if (window.$ && $.i18n && typeof $.i18n.prop === "function") {
+        var t = $.i18n.prop(key);
+        if (t && t !== key && !/^\[.*\]$/.test(t)) return String(t);
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+  function parse_properties(txt) {
+    var out = {};
+    String(txt || "").split(/\r?\n/).forEach(function (l) {
+      var m = l.match(/^\s*([^#!=:\s][^=:]*?)\s*[=:]\s*(.*)$/);
+      if (m) out[m[1]] = m[2].replace(/''/g, "'");
+    });
+    return out;
+  }
+
+  async function load_ant_ui() {
+    var opts = [];
+    try {
+      var r = await fetch("/tmpl/auth/adm/developer_options.html", { cache: "no-store" });
+      var html = r.ok ? await r.text() : "";
+      var m = html.match(/<select[^>]*value:\s*as_mode[^>]*>([\s\S]*?)<\/select>/i);
+      if (m) {
+        (m[1].match(/<option\b[^>]*>/gi) || []).forEach(function (tag) {
+          var v = (tag.match(/\bvalue\s*=\s*"([^"]*)"/i) || [])[1];
+          var k = (tag.match(/\bdata-trans\s*=\s*"([^"]*)"/i) || [])[1] || "";
+          if (v) opts.push({ v: v, key: k, name: "" });
+        });
+      }
+    } catch (e) { /* use the built-in list */ }
+    if (opts.length) { ANT_SRC.list = "router UI (developer_options)"; S.ant_has_ui = true; }
+    else { opts = ANT_BUILTIN.map(function (x) { return { v: x.v, key: x.key, name: "" }; }); S.ant_has_ui = false; }
+
+    // names: the page's own translations first, then its language file, then built-in
+    var props = null, fromPage = 0, fromFile = 0;
+    for (var i = 0; i < opts.length; i++) {
+      var o = opts[i], t = o.key ? page_i18n(o.key) : null;
+      if (t) { o.name = t; fromPage++; continue; }
+      if (props === null) {
+        props = {};
+        try {
+          var lang = (performance.getEntriesByType("resource") || []).map(function (e) { return e.name; })
+            .filter(function (u) { return /Messages_[\w-]+\.properties/i.test(u); })[0] || "/i18n/Messages_en.properties";
+          var lr = await fetch(lang, { cache: "no-store" });
+          if (lr.ok) props = parse_properties(await lr.text());
+        } catch (e) { /* ignore */ }
+      }
+      if (o.key && props[o.key]) { o.name = props[o.key]; fromFile++; continue; }
+      var b = ANT_BUILTIN.filter(function (x) { return x.v === o.v; })[0];
+      o.name = b ? b.name : o.v;
+    }
+    ANT_SRC.names = fromPage ? "router translations" : fromFile ? "router language file" : "built-in";
+    ANT_MODES = opts;
+    fill_ant_select();
+  }
+
+  function fill_ant_select() {
+    var sel = zel("zte_ant_sel");
+    if (sel) {
+      sel.innerHTML = ANT_MODES.map(function (m) {
+        return '<option value="' + esc(m.v) + '" title="value sent: ' + esc(m.v) + '">' + esc(ant_text(m)) + "</option>";
+      }).join("");
+    }
+    zset("zte_ant_src", "Options: " + ANT_SRC.list + " · names: " + ANT_SRC.names);
+    render_antenna();
+  }
+  // The setting exists only on some models (ODU-based). Proof: the router's own developer page
+  // offers the control, OR odu_as_mode holds a real value. A literal "null"/empty (as an
+  // MC8532B returns) means the field is a stub and the model does not have it.
+  function ant_real_value(a) {
+    return !!(a && a.as_mode && a.as_mode !== "null" && String(a.as_mode).trim() !== "");
+  }
+  function ant_supported() {
+    return S.ant_has_ui === true || ant_real_value(S.ant);
+  }
+
+  function render_antenna() {
+    // hide the whole section on a router that does not have this setting (latched once supported)
+    if (ant_supported()) S.ant_supported = true;
+    ztoggle("zte_ant_sec", S.ant_supported === true);
+    if (S.ant_supported !== true) return;
+    var a = S.ant || {};
+    var cur = a.as_mode || "";
+    var sel = zel("zte_ant_sel");
+    // a router without this setting: say so instead of showing an empty control
+    if (!S.ant && S.ant_err) {
+      if (sel) sel.disabled = true;
+      zhtml("zte_ant_cur", '<span style="color:#78909C;font-weight:400">not available on this router (uci zte_nwinfo / odu_as_mode: ' + esc(S.ant_err) + ")</span>");
+      zset("zte_ant_sw", "—");
+      return;
+    }
+    if (sel) sel.disabled = false;
+    // never change the dropdown under the mouse, or while a change is being applied
+    if (sel && !S.ant_busy && document.activeElement !== sel) {
+      Array.prototype.forEach.call(sel.options, function (o) {
+        var lbl = ant_label(o.value);
+        o.textContent = (o.value === cur ? "● " : "  ") + lbl;
+      });
+      if (cur) sel.value = cur;
+    }
+    var known = ANT_MODES.some(function (m) { return m.v === cur; });
+    zhtml("zte_ant_cur", cur
+      ? '<b style="color:' + (cur === "auto" ? "#2E7D32" : "#E65100") + '">' + esc(ant_label(cur)) + "</b>" +
+        ' <span style="font-size:10px;color:#78909C;font-weight:400">(' + esc(cur) + (known ? "" : " — unknown value") + ")</span>"
+      : "—");
+    var en = S.ant_en || {};
+    zset("zte_ant_sw", en.as_switch === undefined ? "—" : String(en.as_switch) === "1" ? "on" : "off (" + en.as_switch + ")");
+  }
+
+  async function read_antenna() {
+    var r = await ubusRetry([UCI_ANT, UCI_ANT_EN], { quiet: true }, 3);
+    var a = uci_values(r[0]), e = uci_values(r[1]);
+    if (a) S.ant = a;
+    if (e) S.ant_en = e;
+    render_antenna();
+    return a ? a.as_mode : null;
+  }
+
+  window.zte_set_antenna = async function (v) {
+    var cur = (S.ant && S.ant.as_mode) || "";
+    var sel = zel("zte_ant_sel");
+    function back() { if (sel) sel.value = cur || "auto"; if (sel) sel.blur(); }
+    if (!v || v === cur) { back(); return; }
+    if (!confirm("Antenna selection → " + ant_label(v) + " (" + v + ")?\n\n" +
+      "• ZTE says: this setting is meant for debugging. A different antenna changes the signal; in normal use choose Automatic switching.\n" +
+      "• It may need a developer session: the panel asks for the router password if none is saved.\n" +
+      "• The connection can drop for a moment while the ODU switches.")) { back(); return; }
+    S.ant_busy = true;
+    var call = { service: "zte_nwinfo_api", method: "nwinfo_set_odu_as_mode", params: { odu_as_mode: v } };
+    try {
+      var r = await ubusRetry(call, { quiet: true }, 3);
+      if (r.accessDenied) { // not in a developer session yet
+        var h = saved_hash() || (await ask_pw_hash());
+        if (!h) { back(); return; }
+        if (!(await developer_option_login(h))) { toast("Developer login failed — antenna selection not changed.", "error"); back(); return; }
+        r = await ubus(call);
+      }
+      if (!r.success) {
+        toast(r.accessDenied ? "The router refused the antenna call, even in a developer session." : "Antenna change failed (" + (r.error || "?") + ")", "error");
+        back();
+        return;
+      }
+      await sleep(1500);
+      S.ant_busy = false;
+      var now = await read_antenna();
+      if (now === v) toast("Antenna selection: " + ant_label(v) + " ✓", "ok");
+      else toast("The router accepted the call, but the setting reads “" + (now || "unknown") + "”.", "warn", 8000);
+    } catch (e) {
+      toast("Antenna selection: no answer from the router (" + e.message + ")", "error");
+      back();
+    } finally {
+      S.ant_busy = false;
+      render_antenna();
+    }
+  };
+  window.zte_antenna_refresh = function () { return read_antenna(); };
+
+  // ─────────────────────────────────────────────
+  //  HIDDEN SETTINGS: session timeout (no page in the router's web UI) and temperature control
+  //  (the router's Developer options page)
+  //   session timeout: zwrt_web / web_login_timeout_period_get -> { login_timeout_period }
+  //                    zwrt_web / web_login_timeout_period_set { login_timeout_period: <number> }
+  //                    (the value must be a NUMBER, not a string)
+  //   thermal control: zwrt_bsp.thermal / get_policy -> { current_policy: 0|1 }
+  //                    zwrt_bsp.thermal / set_policy { name: 19, action: 0|1 }  (action = the new policy)
+  //  Each is shown only if the router answers its getter; tested on an MC7530.
+  // ─────────────────────────────────────────────
+  var THERMAL_POLICY_NAME = 19; // fixed policy id the MC7530 web code uses for set_policy
+
+  // the router's own wording for a setting, so other models show their own labels:
+  // the page's live translations first, then its language file, then the built-in fallback
+  var ROUTER_PROPS = null;
+  async function router_props() {
+    if (ROUTER_PROPS) return ROUTER_PROPS;
+    ROUTER_PROPS = {};
+    try {
+      var lang = (performance.getEntriesByType("resource") || []).map(function (e) { return e.name; })
+        .filter(function (u) { return /Messages_[\w-]+\.properties/i.test(u); })[0] || "/i18n/Messages_en.properties";
+      var r = await fetch(lang, { cache: "no-store" });
+      if (r.ok) ROUTER_PROPS = parse_properties(await r.text());
+    } catch (e) { /* fall back to the built-in text */ }
+    return ROUTER_PROPS;
+  }
+  async function router_str(key, fallback) {
+    var t = page_i18n(key);
+    if (t) return t;
+    var pr = await router_props();
+    return (pr && pr[key]) || fallback;
+  }
+
+  async function read_sys_settings() {
+    var r = await ubus([
+      { service: "zwrt_web", method: "web_login_timeout_period_get" },
+      { service: "zwrt_bsp.thermal", method: "get_policy" },
+    ], { quiet: true });
+    // timeout
+    if (r[0].success && r[0].data && r[0].data.login_timeout_period !== undefined) {
+      S.login_timeout = parseInt(r[0].data.login_timeout_period, 10);
+      S.login_timeout_ok = true;
+    } else if (!r[0].accessDenied) { S.login_timeout_ok = false; }
+    // thermal
+    if (r[1].success && r[1].data && r[1].data.current_policy !== undefined) {
+      S.thermal_policy = parseInt(r[1].data.current_policy, 10);
+      S.thermal_ok = true;
+    } else if (!r[1].accessDenied) { S.thermal_ok = false; }
+    if (S.thermal_ok && !S.thermal_label) {
+      // "Temperature Control" + its protection note, taken from the router (keys from the MC7530 UI)
+      S.thermal_label = await router_str("tc_settings_switch", "Temperature control");
+      S.thermal_info = await router_str("thermal_switch_info",
+        "Protects the device by throttling when it gets too hot. Keep it ON. If turned off, it comes back on after a reboot.");
+    }
+    render_sys_settings();
+  }
+
+  function fmt_timeout(sec) {
+    if (!(sec > 0)) return "—";
+    if (sec % 3600 === 0) return (sec / 3600) + " h";
+    if (sec % 60 === 0) return (sec / 60) + " min";
+    return sec + " s";
+  }
+
+  function render_sys_settings() {
+    var any = S.login_timeout_ok || S.thermal_ok;
+    ztoggle("zte_sys_sec", !!any);
+    ztoggle("zte_sys_timeout_row", !!S.login_timeout_ok);
+    if (S.login_timeout_ok) zhtml("zte_sys_timeout", (S.login_timeout > 0 ? esc(fmt_timeout(S.login_timeout)) +
+      ' <span style="font-size:10px;color:#78909C;font-weight:400">(' + S.login_timeout + " s)</span>" : "—"));
+    ztoggle("zte_sys_thermal_row", !!S.thermal_ok);
+    if (S.thermal_ok) {
+      if (S.thermal_label) zset("zte_thermal_label", S.thermal_label);
+      if (S.thermal_info) zset("zte_thermal_note", S.thermal_info);
+      var on = S.thermal_policy === 1;
+      zhtml("zte_sys_thermal", '<b style="color:' + (on ? "#2E7D32" : "#C62828") + '">' + (on ? "ON" : "OFF") + "</b>" +
+        ' <span style="font-size:10px;color:#78909C;font-weight:400">(policy ' + esc(S.thermal_policy) + ")</span>");
+      var b1 = zel("zte_thermal_on_btn"), b0 = zel("zte_thermal_off_btn");
+      if (b1) b1.classList.toggle("active", on);
+      if (b0) b0.classList.toggle("active", !on);
+    }
+  }
+
+  // runs a setter, handling a developer-session prompt the same way the antenna control does
+  async function sys_set(call) {
+    var r = await ubusRetry(call, { quiet: true }, 3);
+    if (r.accessDenied) {
+      var h = saved_hash() || (await ask_pw_hash());
+      if (!h) return { cancelled: true };
+      if (!(await developer_option_login(h))) { toast("Developer login failed.", "error"); return { denied: true }; }
+      r = await ubus(call);
+    }
+    return r;
+  }
+
+  window.zte_set_login_timeout = async function () {
+    var cur = S.login_timeout > 0 ? S.login_timeout : 600;
+    var inp = prompt("Session timeout — seconds of inactivity before the router logs you out.\n" +
+      "Now: " + cur + " s. New value in seconds (60\u201386400):", String(cur));
+    if (inp === null) return;
+    var n = parseInt(String(inp).trim(), 10);
+    if (!(n >= 60 && n <= 86400)) { toast("Enter a number of seconds between 60 and 86400.", "warn"); return; }
+    var r = await sys_set({ service: "zwrt_web", method: "web_login_timeout_period_set", params: { login_timeout_period: n } });
+    if (r.cancelled) return;
+    if (!r || !r.success) { toast("Could not change the session timeout" + (r && r.error ? " (" + r.error + ")" : "") + ".", "error"); return; }
+    await read_sys_settings();
+    toast("Session timeout set to " + fmt_timeout(S.login_timeout) + " \u2713", "ok", 6000);
+  };
+
+  window.zte_thermal = async function (on) {
+    if (!on) {
+      var info = S.thermal_info || "With it off the device may run hotter. It comes back on after a reboot.";
+      if (!confirm("Turn " + (S.thermal_label || "temperature control") + " OFF?\n\n" + info +
+        "\n\nIt may ask for the router password (developer session).")) return;
+    }
+    var r = await sys_set({ service: "zwrt_bsp.thermal", method: "set_policy", params: { name: THERMAL_POLICY_NAME, action: on ? 1 : 0 } });
+    if (r.cancelled) return;
+    if (!r || !r.success) { toast("Thermal control change failed" + (r && r.error ? " (" + r.error + ")" : "") + ".", "error"); return; }
+    await sleep(1200);
+    await read_sys_settings();
+    if (S.thermal_policy === (on ? 1 : 0)) toast("Thermal control is " + (on ? "ON" : "OFF") + " \u2713", on ? "ok" : "warn", 6000);
+    else toast("The router accepted the call, but thermal control reads policy " + S.thermal_policy + ".", "warn", 8000);
+  };
+
+  // ── GPS ──
+  // Only two things are shown: whether the router has GPS, and its position (as in ng1.27).
+  // The GNSS details in uci zwrt_zte_gnss (fix, satellites, time, A-GNSS) are not shown: on an
+  // MC7530 they stayed at 0 / no fix even while the router returned a position.
+  // That config is read once (at start and on "Check again"), only to tell "no position yet"
+  // from "not available".
+  // Does this router have GPS? The one reliable signal is the position call itself
+  // (zwrt_gnss.get_location_info). The uci zwrt_zte_gnss config is NOT used: an MC8532B keeps
+  // those sections but has no GPS, and the call returns "Object not found".
+  //   yes:  it returned coordinates (now or earlier this session; the MC7530 sends them
+  //         encrypted and its own page decodes them — still a position)
+  //   open: the call works but gave no coordinates yet (no fix), or only an undecodable value
+  //   no:   the call reports the service is absent (Object/Method not found) → not available
+  function gps_service_absent(err) {
+    return /not\s*found|no\s*object|unknown|invalid (object|command)/i.test(String(err || ""));
+  }
+  function gnss_status() {
+    var gp = S.gps || {};
+    if (S.gps_last) return { has: "yes", txt: "yes — position known" + (gp.state !== "pos" ? " (last known)" : ""), col: "#2E7D32" };
+    if (gp.state === "encoded") return { has: "open", txt: "position sent encrypted only — could not decode it", col: "#E65100" };
+    if (gp.state === "nofix") return { has: "open", txt: "no position yet", col: "#E65100" };
+    if (gp.state === "error") {
+      if (gps_service_absent(gp.err)) return { has: "no", txt: "not available on this router", col: "#78909C", why: gp.err };
+      return { has: "open", txt: "unavailable right now", col: "#E65100", why: gp.err };
+    }
+    return { has: "checking", txt: "checking…", col: "#78909C" };
+  }
+
+  function render_gnss() {
+    var st = gnss_status();
+    zhtml("zte_gnss_status", '<span style="color:' + st.col + '">' + esc(st.txt) + "</span>" +
+      (st.why ? '<div style="font-size:9px;color:#B0BEC5;font-weight:400;">' + esc(st.why) + "</div>" : ""));
+    ztoggle("zte_gnss_data", st.has === "yes" || st.has === "open");
+    zset("zte_gnss_refresh_btn", st.has === "no" ? "🛰 Check again" : "🛰 Refresh position");
+  }
+
 
   // ── Traffic counter reset ──
   // From the router's own web UI (service_rpc.js):
@@ -1697,6 +2089,16 @@
     show_modal("SMS Storage (WMS)", info_table("WMS Capacity", r.data));
   };
 
+  // A router without WiFi (an outdoor unit such as the MC7530) keeps the uci "wireless" config,
+  // but its WiFi service is missing: zwrt_wlan answers "Object not found". The WiFi section is
+  // hidden only on that answer; any other answer (or none) keeps it visible.
+  async function check_wifi() {
+    var r;
+    try { r = await ubusRetry({ service: "zwrt_wlan", method: "report", params: {} }, { quiet: true }, 3); } catch (e) { r = null; }
+    S.wifi_absent = !!(r && !r.success && !r.accessDenied && /not\s*found/i.test(String(r.error || "")));
+    ztoggle("zte_wifi_sec", !S.wifi_absent);
+  }
+
   window.zte_wifi_info = async function () {
     var r = await ubusRetry([
       { service: "uci", method: "get", params: { config: "wireless", section: "wifi0" } },
@@ -1968,6 +2370,8 @@
     { service: "zwrt_bsp.thermal", method: "get_cpu_temp" },
     { service: "zwrt_mc.device.manager", method: "get_device_info" },
     { service: "zwrt_router.api", method: "router_get_status" },
+    // uci reads for the ODU antenna (see "ODU ANTENNA, GPS")
+    UCI_ANT, UCI_ANT_EN,
   ];
 
   // fastOnly = true reads just the fast group; without it everything is refreshed
@@ -1981,6 +2385,10 @@
         if (res[2].success) S.thermal = res[2].data || {};
         if (res[3].success) S.devinfo = res[3].data || {};
         if (res[4].success) S.wan = res[4].data || {};
+        var v;
+        if ((v = uci_values(res[5])) && !S.ant_busy) { S.ant = v; S.ant_err = null; }
+        else if (!v && res[5] && !res[5].accessDenied) S.ant_err = res[5].error || "no data";
+        if ((v = uci_values(res[6]))) S.ant_en = v;
       }
 
       if (res.every(function (r) { return r.accessDenied; })) {
@@ -2170,6 +2578,9 @@
 
     update_traffic();
     update_device();
+    // ODU antenna + GPS
+    render_antenna();
+    render_gnss();
   }
 
   function update_session_info() {
@@ -2301,6 +2712,7 @@
       ".zte_modal_hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;color:#fff;font-weight:700;font-size:13px;",
       "background:linear-gradient(135deg,#1976D2,#1565C0);border-radius:12px 12px 0 0;}",
       ".zte_modal_body{padding:10px;overflow-y:auto;}",
+      ".zte_select{max-width:62%;padding:3px 6px;border:1px solid #B0BEC5;border-radius:6px;font-size:11px;background:#fff;color:#37474F;font-family:inherit;cursor:pointer;}",
     ].join("");
     document.head.appendChild(s);
   }
@@ -2360,6 +2772,19 @@
       '<span class="zte_sec_title" style="margin-bottom:0">5G Signal (NR)</span>' +
       '<span id="zte_5g_bands_row" style="font-size:10px;display:none;"><span id="zte_5g_active_bands">—</span></span>' +
       '</div><div id="zte_nr_cards"></div></div>' +
+      // ── ODU ANTENNA (shown only if the router has the setting) ──
+      '<div class="zte_sec" id="zte_ant_sec" style="display:none;"><div class="zte_sec_title">ODU Antenna Selection</div>' +
+      '<div class="zte_row"><span class="zte_label">Method</span>' +
+      '<select id="zte_ant_sel" class="zte_select" onchange="window.zte_set_antenna(this.value)">' +
+      ANT_MODES.map(function (m) { return '<option value="' + esc(m.v) + '">' + esc(ant_text(m)) + "</option>"; }).join("") +
+      "</select></div>" +
+      '<div id="zte_ant_src" style="font-size:9px;color:#B0BEC5;text-align:right;margin-top:-2px;">—</div>' +
+      vrow("In use", "zte_ant_cur") +
+      vrow("Auto-selection switch", "zte_ant_sw") +
+      '<div style="font-size:10px;color:#78909C;margin-top:5px;">ZTE: for debugging; in normal use keep <b>Automatic switching</b>. ' +
+      "A change may ask for the router password (developer session) and lasts until reboot.</div>" +
+      '<div class="zte_btn_grid">' + btn("↻ Refresh antenna", "window.zte_antenna_refresh()", "full") + "</div>" +
+      "</div>" +
       // ── NEIGHBOUR SCAN & FORCE CONNECT ──
       '<div class="zte_sec"><div class="zte_sec_title">Neighbor Scan & Force Connect</div>' +
       '<div style="font-size:10px;color:#78909C;margin-bottom:6px;">Uses the router\'s built-in scan (~30 s). ' +
@@ -2456,16 +2881,23 @@
       '<div class="zte_sec"><div class="zte_sec_title">Device Info</div>' +
       '<div class="zte_sub" style="margin-top:0">System</div><div id="zte_dev_system"></div>' +
       '<div class="zte_sub">WAN</div><div id="zte_dev_wan"></div>' +
-      '<div id="zte_dev_gps_wrap" style="display:none;"><div class="zte_sub">GPS</div><div id="zte_dev_gps"></div></div>' +
       '<div class="zte_btn_grid">' +
       btn("📶 SIM Info", "window.zte_sim_info()") +
       btn("ℹ️ HW / SW Version", "window.zte_hw_sw_info()") +
       btn("✉ SMS Storage", "window.zte_wms_info()") +
       btn("📡 APN", "window.zte_apn_info()") +
-      btn("🛰 Refresh GPS", "window.zte_gps_refresh()", "full") +
+      "</div></div>" +
+      // ── GPS ──
+      '<div class="zte_sec" id="zte_gnss_wrap"><div class="zte_sec_title">GPS</div>' +
+      vrow("GPS", "zte_gnss_status") +
+      '<div id="zte_gnss_data" style="display:none;">' +
+      '<div id="zte_dev_gps_wrap" style="display:none;"><div class="zte_sub">Position</div><div id="zte_dev_gps"></div></div>' +
+      "</div>" +
+      '<div class="zte_btn_grid">' +
+      '<button class="zte_btn full" id="zte_gnss_refresh_btn" onclick="window.zte_gps_refresh()">🛰 Refresh position</button>' +
       "</div></div>" +
       // ── WIFI ──
-      '<div class="zte_sec"><div class="zte_sec_title">WiFi</div><div class="zte_btn_grid">' +
+      '<div class="zte_sec" id="zte_wifi_sec"><div class="zte_sec_title">WiFi</div><div class="zte_btn_grid">' +
       btn("ℹ️ WiFi Info", "window.zte_wifi_info()", "full") +
       btn("📡 Set TX Power", "window.zte_wifi_txpower()") +
       btn("🌍 Set Country", "window.zte_wifi_country()", "warn") +
@@ -2479,6 +2911,19 @@
       btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
       '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
       btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
+      "</div></div>" +
+      // ── HIDDEN SETTINGS (shown only if the router supports them) ──
+      '<div class="zte_sec" id="zte_sys_sec" style="display:none;"><div class="zte_sec_title">Hidden Settings</div>' +
+      '<div class="zte_row" id="zte_sys_timeout_row" style="display:none;"><span class="zte_label">Session timeout</span>' +
+      '<span class="zte_value" id="zte_sys_timeout">\u2014</span></div>' +
+      '<div class="zte_btn_grid" id="zte_sys_timeout_btns" style="margin-bottom:6px;">' +
+      btn("\u270f Change session timeout\u2026", "window.zte_set_login_timeout()", "full") + "</div>" +
+      '<div class="zte_row" id="zte_sys_thermal_row" style="display:none;"><span class="zte_label" id="zte_thermal_label">Temperature control</span>' +
+      '<span class="zte_value" id="zte_sys_thermal">\u2014</span></div>' +
+      '<div class="zte_btn_grid">' +
+      '<button class="zte_btn ok" id="zte_thermal_on_btn" onclick="window.zte_thermal(true)">\ud83c\udf21 On</button>' +
+      '<button class="zte_btn danger" id="zte_thermal_off_btn" onclick="window.zte_thermal(false)">\ud83c\udf21 Off</button>' +
+      '<div id="zte_thermal_note" style="grid-column:1/-1;font-size:10px;color:#78909C;">Keep it on.</div>' +
       "</div></div>" +
       // ── TIP ──
       (CFG.bmac
@@ -2559,8 +3004,11 @@
       if (!ct) stamp(localStorage, LOGOUT_KEY);
     });
     poll_loop();
+    setTimeout(read_sys_settings, 5000); // session timeout + temperature control, shown only if supported
+    setTimeout(check_wifi, 3500); // hides the WiFi section on routers without WiFi
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
     setTimeout(update_arp_state, 8000); // one read; afterwards only when the ARP proxy is switched
+    setTimeout(load_ant_ui, 3000); // antenna options + names from the router's own UI (once)
     start_hidden_menus();
     toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");
   }
