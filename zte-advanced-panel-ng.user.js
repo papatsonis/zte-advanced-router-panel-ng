@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.30
+// @version      2026-ng1.31
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -85,7 +85,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.30",
+    version: "2026-ng1.31",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -695,8 +695,9 @@
   //   default_lte_ext_band_lock   "1,3,7,8,20,28,38"
   //   default_nr5g_sa_band_lock   "1,3,7,28,75,78"
   //   default_nr5g_nsa_band_lock  "1,3,7,28,75,78"
-  // These are what "no band lock" means on that model. The panel uses them for the band buttons,
-  // for the "Unlocked" status, for "Remove band lock", and to refuse bands the router does not have.
+  // These are what "no band lock" means on that model. The panel shows them as "Supported bands"
+  // and uses them for the "Unlocked" status, for "Remove band lock", to leave out band buttons the
+  // router cannot do, and to refuse bands it does not have.
   // CFG.lte_all_bands / CFG.nr_all_bands are only a fallback for firmware that reports no such list.
   var UCI_BAND_DEFAULTS = { service: "uci", method: "get", params: { config: "zwrt_zte_nwinfo", section: "default_band_lock" } };
 
@@ -729,7 +730,11 @@
     S.bands_busy = true;
     try {
       var r = await ubusRetry(UCI_BAND_DEFAULTS, { quiet: true });
-      if (r.accessDenied) return;
+      if (r.accessDenied) { // not answered: try a few more times, and again before a band action
+        S.bands_tries = (S.bands_tries || 0) + 1;
+        if (S.bands_tries < 4) setTimeout(load_band_caps, 8000);
+        return;
+      }
       var v = uci_values(r) || {};
       var lte = band_list(v.default_lte_ext_band_lock);
       if (!lte.length && v.default_lte_band_lock) lte = (lte_bands_from_mask(v.default_lte_band_lock) || []).map(String);
@@ -742,27 +747,36 @@
     }
   }
 
-  // Band buttons: one per band the router has, then the usual combinations that it can do.
+  // Band buttons: a fixed set of common locks. One that needs a band this router does not have
+  // is left out. Every other band of the router is reachable through "Custom".
   var BAND_PRESETS = {
-    lte: { singles: ["1", "3", "7", "8", "20", "28"], combos: ["1+3", "1+3+7", "1+3+20", "1+3+7+20", "3+20"] },
-    nr: { singles: ["1", "3", "7", "28", "38", "75", "78"], combos: ["28+75", "38+78", "3+38+78", "28+78", "78+28+75"] },
+    lte: ["1", "3", "7", "8", "20", "28", "1+3", "1+3+7", "1+3+20", "1+3+7+20", "3+20"],
+    nr: ["1", "3", "7", "28", "38", "75", "78", "1+78", "28+75", "38+78", "3+38+78", "28+78", "78+28+75"],
   };
   function band_chips(kind) {
     var lte = kind === "lte";
     var avail = lte ? lte_avail() : nr_avail();
-    var known = lte ? lte_from_router() : nr_from_router();
-    var singles = known ? avail : BAND_PRESETS[kind].singles;
-    var combos = BAND_PRESETS[kind].combos.filter(function (c) {
-      return c.split("+").every(function (b) { return avail.indexOf(b) > -1; });
-    });
     var prefix = lte ? "B" : "N", fn = lte ? "window.zte_lte_band" : "window.zte_nr_band";
-    function one(b) { return chip(prefix + b, fn + "('" + b + "')"); }
-    return '<div class="zte_bandrow">' + singles.map(one).join("") + "</div>" +
-      '<div class="zte_bandrow">' + combos.map(one).join("") + chip("✏ Custom", fn + "(null)") + "</div>";
+    return '<div class="zte_bandrow">' +
+      BAND_PRESETS[kind].filter(function (c) {
+        return c.split("+").every(function (b) { return avail.indexOf(b) > -1; });
+      }).map(function (b) { return chip(prefix + b, fn + "('" + b + "')"); }).join("") +
+      chip("✏ Custom", fn + "(null)") + "</div>";
+  }
+  // The grey "Supported bands" line under each "Remove band lock" button: what the router reports
+  function bands_supported_text(kind) {
+    if (!S.bands_loaded) return "reading…";
+    if (kind === "lte") return lte_from_router() ? "B" + S.bands.lte.join(", B") : "not reported by this router";
+    if (!nr_from_router()) return "not reported by this router";
+    var sa = S.bands.nr_sa, nsa = S.bands.nr_nsa;
+    if (!sa.length || !nsa.length || sa.join() === nsa.join()) return "n" + nr_avail().join(", n");
+    return "SA n" + sa.join(", n") + " · NSA n" + nsa.join(", n");
   }
   function render_band_chips() {
     zhtml("zte_lte_chips", band_chips("lte"));
     zhtml("zte_nr_chips", band_chips("nr"));
+    zset("zte_lte_supported", bands_supported_text("lte"));
+    zset("zte_nr_supported", bands_supported_text("nr"));
   }
   // Bands of `list` that this router does not have (only when the router reported its bands)
   function bands_missing(list, avail, known) {
@@ -3210,6 +3224,7 @@
       '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_lte_band_lock_status" style="font-weight:700">—</span></span></div>' +
       '<div id="zte_lte_chips">' + band_chips("lte") + "</div>" +
       '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_lte_band_unlock()">🔓 Remove LTE Band Lock</button>' +
+      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_lte_supported">reading…</span></div>' +
       "</div>" +
       // ── 5G BANDS ──
       '<div class="zte_sec">' +
@@ -3219,6 +3234,7 @@
       '<div id="zte_nr_chips">' + band_chips("nr") + "</div>" +
       '<div style="font-size:10px;color:#78909C;margin-top:5px;">NSA lock type in use: <b id="zte_nr_lock_type">—</b> (found automatically)</div>' +
       '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_nr_band_unlock()">🔓 Remove NR Band Lock</button>' +
+      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_nr_supported">reading…</span></div>' +
       '<div class="zte_btn_grid">' +
       btn("🧪 Probe 5G NSA lock", "window.zte_probe_nr_nsa()", "warn") +
       btn("🔎 Find band-lock API", "window.zte_find_lock_api()") +

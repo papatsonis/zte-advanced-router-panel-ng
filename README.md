@@ -37,7 +37,7 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 | **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
 | **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, ARP proxy on/off, reboot |
 | **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
-| **LTE bands / 5G bands** | One-click band locks with live status. The buttons show the bands your router has (read from the router), and a band it does not have is refused. A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
+| **LTE bands / 5G bands** | One-click band locks with live status. Each frame lists the bands your router supports (read from the router); a button that needs a band it does not have is left out, and such a band is refused in "Custom". A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
 | **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks |
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
 | **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
