@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.33
+// @version      2026-ng1.34
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -85,7 +85,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.33",
+    version: "2026-ng1.34",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -3278,11 +3278,6 @@
     zhtml("zte_nr_cards", nr.length
       ? nr.map(function (c, i) { return cell_card("nr", c, i, nr.length); }).join("")
       : '<div style="color:#78909C;font-size:11px;">No 5G cells</div>');
-    if (nr.length) {
-      zhtml("zte_5g_active_bands", '<span style="color:#7B1FA2;font-weight:700;">' +
-        esc(nr.map(function (c, i) { return (i === 0 ? "PCell n" : "SCell n") + c.band; }).join(" + ")) + "</span>");
-    }
-    ztoggle("zte_5g_bands_row", nr.length > 0);
 
     // ── Neighbour cells (only if the firmware exposes such a field) ──
     var nkeys = Object.keys(d).filter(function (k) { return /ngbr|neighbo|nbr_cell/i.test(k) && d[k]; });
@@ -3492,11 +3487,7 @@
       // ── LTE SIGNAL ──
       '<div class="zte_sec"><div class="zte_sec_title">LTE Signal</div><div id="zte_lte_cards"></div></div>' +
       // ── 5G SIGNAL ──
-      '<div class="zte_sec">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
-      '<span class="zte_sec_title" style="margin-bottom:0">5G Signal (NR)</span>' +
-      '<span id="zte_5g_bands_row" style="font-size:10px;display:none;"><span id="zte_5g_active_bands">—</span></span>' +
-      '</div><div id="zte_nr_cards"></div></div>' +
+      '<div class="zte_sec"><div class="zte_sec_title">5G Signal (NR)</div><div id="zte_nr_cards"></div></div>' +
       // ── ODU ANTENNA (shown only if the router has the setting) ──
       '<div class="zte_sec" id="zte_ant_sec" style="display:none;"><div class="zte_sec_title">ODU Antenna Selection</div>' +
       '<div class="zte_row"><span class="zte_label">Method</span>' +
@@ -3536,7 +3527,7 @@
       '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Operation mode: <b id="zte_opmode">—</b></div>' +
       btn("🧩 ARP Proxy ON", "window.zte_arp_proxy(true)") +
       btn("🧩 ARP Proxy OFF", "window.zte_arp_proxy(false)", "danger") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">ARP proxy: <b id="zte_arp_state">—</b></div>' +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">ARP proxy: <b id="zte_arp_state">—</b> <span style="color:#B0BEC5;">(default: off)</span></div>' +
       btn("🔄 Reboot Router", "window.zte_reboot()", "danger full") +
       "</div></div>" +
       // ── NETWORK MODE ──
