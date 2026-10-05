@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.31
-// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS. Lite edition without the developer tools.
+// @version      2026-ng1.32
+// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
 // @homepageURL  https://github.com/papatsonis/zte-advanced-router-panel-ng
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.31",
+    version: "2026-ng1.32",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -1762,6 +1762,223 @@
     render_sys_settings();
   }
 
+  // ─────────────────────────────────────────────
+  //  QoS (global speed cap) + TR-069 status
+  //  QoS:  zwrt_router.api.router_get_qos / router_set_qos
+  //        get -> { qos_smart_switch, upload_total_limit_rate, download_total_limit_rate,
+  //                 upload_total_limit_unit, download_total_limit_unit, qos_smart_pri_type }
+  //        unit 3 = Mb/s (what the router's own UI offers, with 10Mb/s and Gb/s too).
+  //  TR-069 status is READ-ONLY: get_acsinfo returns the whole ACS config incl. the password;
+  //  the panel reads ONLY the EnableCWMP flag and never stores or shows anything else. Changing
+  //  it is not offered — acsinfo_change needs the full ACS object including the password.
+  // ─────────────────────────────────────────────
+  var QOS_UNIT_MBPS = 3;
+  async function load_qos_cap() {
+    var r = await ubusRetry({ service: "zwrt_router.api", method: "router_get_qos" }, { quiet: true }, 2);
+    if (r.accessDenied) { setTimeout(load_qos_cap, 8000); return; } // not answered yet
+    // supported if the method exists (code 0), even when it returns no payload (QoS off)
+    S.qos_ok = !!(r.success || (r.code === 0));
+    if (r.success && r.data) S.qos = r.data;
+    render_dev_sec();
+    if (S.qos_ok) { refresh_qos(); load_qos_profiles(); }
+  }
+
+  // ── TR-069 (remote management) on/off ──
+  // Status comes from a plain read of EnableCWMP (no credentials touched). The actual on/off uses
+  // the router's OWN service_rpc functions getTR069Config / setTR069Configuration, which decode and
+  // re-encode the ACS password internally — the panel only flips EnableCWMP and never sees the
+  // password. These functions live in service_rpc even when the router hides the TR-069 page, which
+  // is the point: it lets you turn remote management off on firmware that offers no page for it.
+  async function load_tr069_cap() {
+    var r = await ubusRetry({ service: "zwrt_tr069.api", method: "get_acsinfo", params: { moduleName: "web" } }, { quiet: true }, 2);
+    if (r.accessDenied) { setTimeout(load_tr069_cap, 8000); return; }
+    if (r.success && r.data && r.data.EnableCWMP !== undefined) {
+      S.tr069_ok = true;
+      S.tr069 = { on: String(r.data.EnableCWMP) === "1", inform: String(r.data.PeriodicInformEnable) === "1" };
+    } else {
+      S.tr069_ok = false;
+    }
+    render_dev_sec();
+  }
+  function rpc_mod() { try { return (window.requirejs || window.require)("service_rpc"); } catch (e) { return null; } }
+  // getTR069Config delivers its result through one of two callbacks depending on the build, so both
+  // are wired to the same handler; a non-config value resolves to null.
+  function tr069_read_full() {
+    return new Promise(function (res) {
+      var m = rpc_mod();
+      if (!m || typeof m.getTR069Config !== "function") return res(null);
+      var done = false;
+      function fin(v) { if (!done) { done = true; res(v && typeof v === "object" && v.enableCWMP !== undefined ? v : null); } }
+      try { m.getTR069Config(fin, fin); } catch (e) { fin(null); }
+      setTimeout(function () { fin(null); }, 7000);
+    });
+  }
+  function tr069_write_full(cfg) {
+    return new Promise(function (res) {
+      var m = rpc_mod();
+      if (!m || typeof m.setTR069Configuration !== "function") return res({ ok: false, err: "no setter" });
+      var done = false;
+      function fin(v) { if (!done) { done = true; res(v); } }
+      try { m.setTR069Configuration(cfg, fin, fin); } catch (e) { fin({ ok: false, err: e.message }); }
+      setTimeout(function () { fin({ ok: false, err: "timeout" }); }, 9000);
+    });
+  }
+  async function refresh_qos() {
+    var r = await ubusRetry({ service: "zwrt_router.api", method: "router_get_qos" }, { quiet: true }, 2);
+    if (r.success) { S.qos = r.data || {}; render_dev_sec(); }
+  }
+  function qos_on() { return !!(S.qos && String(S.qos.qos_smart_switch) === "1"); }
+  // qos_smart_pri_type 0-3. Names are read from the router's own QoS page (data-trans keys),
+  // with these English strings only as a fallback if the router does not provide them.
+  var QOS_PROFILES = [
+    { v: "0", key: "speed_allocation_priority_0", name: "Automatic" },
+    { v: "1", key: "speed_allocation_priority_1", name: "Game priority" },
+    { v: "2", key: "speed_allocation_priority_2", name: "Web page priority" },
+    { v: "3", key: "speed_allocation_priority_3", name: "Video priority" },
+  ];
+  // read the profile labels from the router (once), then refresh the dropdown
+  async function load_qos_profiles() {
+    if (S.qos_prof_loaded) return;
+    S.qos_prof_loaded = true;
+    for (var i = 0; i < QOS_PROFILES.length; i++) {
+      QOS_PROFILES[i].name = await router_str(QOS_PROFILES[i].key, QOS_PROFILES[i].name);
+    }
+    render_dev_sec();
+  }
+  function qos_profile_now() { return S.qos && S.qos.qos_smart_pri_type !== undefined ? String(S.qos.qos_smart_pri_type) : "0"; }
+  // QoS only does anything in router mode. In bridge mode the router doesn't route, so the
+  // firmware itself drops QoS from the menu; the panel hides it too (the ubus call still answers
+  // and would accept a write, but it has no effect while bridged).
+  function wan_is_bridge() { return /bridge/i.test((S.wan && S.wan.opms_wan_mode) || ""); }
+  function render_dev_sec() {
+    var qos_vis = S.qos_ok && !wan_is_bridge();
+    var show = qos_vis || S.tr069_ok;
+    ztoggle("zte_dev_sec", show);
+    ztoggle("zte_qos_row", !!qos_vis);
+    ztoggle("zte_qos_btns", !!qos_vis);
+    ztoggle("zte_qos_prof_row", !!qos_vis);
+    if (qos_vis) {
+      var on = qos_on();
+      var prof = QOS_PROFILES.filter(function (p) { return p.v === qos_profile_now(); })[0];
+      var txt = on
+        ? '<b style="color:#E65100">ON</b> — ↑' + esc(S.qos.upload_total_limit_rate) + " / ↓" +
+          esc(S.qos.download_total_limit_rate) + " Mb/s" + (prof ? " · " + esc(prof.name) : "")
+        : '<span style="color:#78909C">off</span>';
+      zhtml("zte_qos_state", txt);
+      var b1 = zel("zte_qos_on_btn"), b0 = zel("zte_qos_off_btn");
+      if (b1) b1.classList.toggle("active", on);
+      if (b0) b0.classList.toggle("active", !on);
+      var sel = zel("zte_qos_profile");
+      if (sel) {
+        // (re)build when the option count or the labels changed (e.g. after the router labels load)
+        if (sel.options.length !== QOS_PROFILES.length || (sel.options[0] && sel.options[0].textContent !== QOS_PROFILES[0].name)) {
+          sel.innerHTML = QOS_PROFILES.map(function (p) { return '<option value="' + p.v + '">' + esc(p.name) + "</option>"; }).join("");
+        }
+        if (document.activeElement !== sel) sel.value = qos_profile_now(); // don't fight the user mid-selection
+      }
+    }
+    ztoggle("zte_tr069_row", !!S.tr069_ok);
+    ztoggle("zte_tr069_btns", !!S.tr069_ok);
+    if (S.tr069_ok && S.tr069) {
+      var ton = S.tr069.on, inf = S.tr069.inform;
+      zhtml("zte_tr069_state",
+        'CWMP <b style="color:' + (ton ? "#C62828" : "#2E7D32") + '">' + (ton ? "ON" : "off") + "</b>" +
+        ' · Inform <b style="color:' + (inf ? "#C62828" : "#2E7D32") + '">' + (inf ? "on" : "off") + "</b>");
+      var t1 = zel("zte_tr069_on_btn"), t0 = zel("zte_tr069_off_btn");
+      if (t1) t1.classList.toggle("active", ton);
+      if (t0) t0.classList.toggle("active", !ton);
+      var i1 = zel("zte_tr069_inform_on_btn"), i0 = zel("zte_tr069_inform_off_btn");
+      if (i1) i1.classList.toggle("active", inf);
+      if (i0) i0.classList.toggle("active", !inf);
+    }
+  }
+
+  // on=true: ask for the limits and turn QoS on; on=false: turn it off
+  window.zte_qos = async function (on) {
+    if (!on) {
+      if (!confirm("Turn the QoS speed limit off?")) return;
+      var r0 = await sys_set({ service: "zwrt_router.api", method: "router_set_qos", params: { qos_smart_switch: 0 } });
+      if (r0 && r0.cancelled) return;
+      toast(r0 && r0.success ? "QoS turned off ✓" : "QoS off failed" + (r0 && r0.error ? " (" + r0.error + ")" : ""), r0 && r0.success ? "ok" : "error");
+      await refresh_qos();
+      return;
+    }
+    var curUp = (S.qos && S.qos.upload_total_limit_rate) || "";
+    var curDn = (S.qos && S.qos.download_total_limit_rate) || "";
+    var up = prompt("QoS — maximum UPLOAD speed in Mb/s (whole number):", String(curUp || ""));
+    if (up === null) return;
+    var dn = prompt("QoS — maximum DOWNLOAD speed in Mb/s (whole number):", String(curDn || ""));
+    if (dn === null) return;
+    up = parseInt(up, 10); dn = parseInt(dn, 10);
+    if (!(up > 0) || !(dn > 0)) { toast("Enter whole numbers greater than 0.", "error"); return; }
+    // set the rates (with unit = Mb/s), then switch QoS on
+    var r1 = await sys_set({ service: "zwrt_router.api", method: "router_set_qos", params: {
+      upload_total_limit_rate: up, download_total_limit_rate: dn,
+      upload_total_limit_unit: QOS_UNIT_MBPS, download_total_limit_unit: QOS_UNIT_MBPS } });
+    if (r1 && r1.cancelled) return;
+    if (!(r1 && r1.success)) { toast("QoS set failed" + (r1 && r1.error ? " (" + r1.error + ")" : ""), "error"); return; }
+    // turn QoS on, keeping the current profile
+    var r2 = await sys_set({ service: "zwrt_router.api", method: "router_set_qos", params: { qos_smart_switch: 1, qos_smart_pri_type: parseInt(qos_profile_now(), 10) } });
+    toast(r2 && r2.success ? "QoS on — ↑" + up + " / ↓" + dn + " Mb/s ✓" : "QoS switch failed", r2 && r2.success ? "ok" : "error");
+    await refresh_qos();
+  };
+
+  // Change the QoS profile (qos_smart_pri_type). Keeps QoS in its current on/off state.
+  window.zte_qos_profile = async function (v) {
+    var n = parseInt(v, 10);
+    if (!(n >= 0)) return;
+    var prof = QOS_PROFILES.filter(function (p) { return p.v === String(n); })[0];
+    var r = await sys_set({ service: "zwrt_router.api", method: "router_set_qos", params: { qos_smart_switch: qos_on() ? 1 : 0, qos_smart_pri_type: n } });
+    if (r && r.cancelled) { await refresh_qos(); return; }
+    toast(r && r.success ? "QoS profile: " + (prof ? prof.name : v) + " ✓" : "QoS profile change failed", r && r.success ? "ok" : "error");
+    await refresh_qos();
+  };
+
+  // Re-read just the on/off state (no credentials handled here)
+  async function refresh_tr069() {
+    var r = await ubusRetry({ service: "zwrt_tr069.api", method: "get_acsinfo", params: { moduleName: "web" } }, { quiet: true }, 2);
+    if (r.success && r.data && r.data.EnableCWMP !== undefined) {
+      S.tr069 = { on: String(r.data.EnableCWMP) === "1", inform: String(r.data.PeriodicInformEnable) === "1" };
+      render_dev_sec();
+    }
+  }
+
+  // Turn TR-069 / CWMP on or off. The ACS config (including the password) is read and written back
+  // through the router's own functions; the panel changes only EnableCWMP and never sees the password.
+  // Change one or both TR-069 flags (enableCWMP / informEnable). Everything else — including the ACS
+  // password — is read and written back through the router's own functions untouched by the panel.
+  async function tr069_apply(changes, label) {
+    var m = rpc_mod();
+    if (!m || typeof m.getTR069Config !== "function" || typeof m.setTR069Configuration !== "function") {
+      toast("This firmware does not expose the TR-069 config functions, so the panel can't change it.", "error", 9000);
+      return;
+    }
+    var g = await tr069_read_full();
+    if (!g) { toast("Could not read the TR-069 configuration.", "error"); return; }
+    var payload = {
+      enableCWMP: changes.enableCWMP !== undefined ? changes.enableCWMP : g.enableCWMP,
+      serverURL: g.serverUrl, serverusername: g.serverUserName, serveruserpassword: g.serverPassword,
+      connrequestname: g.requestUserName, connrequestpassword: g.requestPassword, connrequestport: g.requestPort,
+      tr069_PeriodicInformEnable: changes.informEnable !== undefined ? changes.informEnable : g.tr069_PeriodicInformEnable,
+      tr069_PeriodicInformInterval: g.tr069_PeriodicInformInterval,
+    };
+    var res = await tr069_write_full(payload);
+    var ok = res && (res.result === "success" || res.result === 0 || res.result === "0");
+    toast(ok ? label + " ✓" : label + " failed" + (res && res.errorText ? " (" + res.errorText + ")" : ""), ok ? "ok" : "error", 7000);
+    setTimeout(refresh_tr069, 800);
+  }
+
+  // Master TR-069 / CWMP switch
+  window.zte_tr069 = function (on) {
+    if (on && !confirm("Turn TR-069 ON?\n\nThis lets your operator manage the router remotely (ACS). Only turn it on if you need it.")) return;
+    if (!on && !confirm("Turn TR-069 (remote management) OFF?")) return;
+    return tr069_apply({ enableCWMP: on ? 1 : 0 }, "TR-069 turned " + (on ? "ON" : "off"));
+  };
+  // Periodic Inform sub-switch (how/whether the router periodically reports to the ACS)
+  window.zte_tr069_inform = function (on) {
+    return tr069_apply({ informEnable: on ? 1 : 0 }, "Periodic inform " + (on ? "on" : "off"));
+  };
+
   function fmt_timeout(sec) {
     if (!(sec > 0)) return "—";
     if (sec % 3600 === 0) return (sec / 3600) + " h";
@@ -2451,25 +2668,130 @@
   };
 
   // Pages the web UI can open but has no menu entry for
-  window.zte_hidden_pages = function () {
-    var pages = ui_pages().filter(function (p) {
-      if (HIDDEN_SKIP.indexOf(p.hash) !== -1) return false;
-      var links = document.querySelectorAll('a[href="' + p.hash + '"]');
-      for (var i = 0; i < links.length; i++) if (!in_panel(links[i])) return false;
-      return true;
+  // Force a hidden page to render, the same way the router's own code does: pull its template and
+  // module, drop the template into #container and run the module's init(). This skips the menu
+  // guard that otherwise refuses to navigate to a page the current mode does not link, so pages
+  // like TR-069 config or Developer options open even where the firmware hides them.
+  function force_open_page(path) {
+    return new Promise(function (resolve) {
+      var req = window.requirejs || window.require;
+      var c = document.getElementById("container");
+      if (!req || !c || !path) { resolve(false); return; }
+      var done = false;
+      function fin(v) { if (!done) { done = true; resolve(v); } }
+      try {
+        req(["text!tmpl/" + path + ".html", path], function (tmpl, mod) {
+          try {
+            try { if (window.$) window.$("body").removeClass().addClass("page_" + path.replace(/\//g, "_")); } catch (e) { /* ignore */ }
+            c.innerHTML = tmpl;
+            try { if (mod && typeof mod.init === "function") mod.init(); } catch (e) { console.warn("[ZTE] forced page init:", e && e.message); }
+            try { if (window.$ && window.$("#container").translate) window.$("#container").translate(); } catch (e) { /* ignore */ }
+            try { if (window.$) window.$("form").attr("autocomplete", "off"); } catch (e) { /* ignore */ }
+            fin(true);
+          } catch (e) { fin(false); }
+        }, function () { fin(false); });
+      } catch (e) { fin(false); }
+      setTimeout(function () { fin(false); }, 8000);
     });
+  }
+
+  // Directories a page template can live in, tried in turn when a hidden page's path is unknown.
+  var PAGE_DIRS = ["auth/adm/", "auth/firewall/", "auth/network/", "auth/wifi/", "auth/voip/",
+    "auth/sms/", "auth/status/", "auth/update/", "auth/mesh/", "auth/nfc/", "auth/"];
+
+  // hash -> path from every menu array the firmware defines (even entries it keeps hidden).
+  var MENU_PATHMAP = null;
+  function menu_path_map() {
+    if (MENU_PATHMAP) return MENU_PATHMAP;
+    MENU_PATHMAP = {};
+    var mods = ui_modules();
+    if (mods) Object.keys(mods).forEach(function (k) {
+      if (!/(^|\/)menu(_\w+)?$/.test(k) || !Array.isArray(mods[k])) return;
+      (function walk(arr) {
+        arr.forEach(function (e) {
+          if (!e) return;
+          if (e.hash && e.path) MENU_PATHMAP[e.hash] = e.path;
+          ["child", "children", "subMenu"].forEach(function (c) { if (Array.isArray(e[c])) walk(e[c]); });
+        });
+      })(mods[k]);
+    });
+    return MENU_PATHMAP;
+  }
+
+  // hash -> module path. Uses the menu arrays and the firmware's findMenu first; for pages the
+  // firmware has no route for (the truly hidden ones) it probes the template files.
+  async function resolve_hidden_path(hash, knownPath) {
+    if (knownPath) return knownPath;
+    var mapped = menu_path_map()[hash];
+    if (mapped) return mapped;
+    try {
+      var mods = ui_modules(), menu = mods && mods["config/menu"];
+      if (menu && typeof menu.findMenu === "function") {
+        var r = menu.findMenu(hash);
+        if (r && r[0] && r[0].path) return r[0].path;
+      }
+    } catch (e) { /* ignore */ }
+    var name = String(hash).replace(/^#/, "");
+    if (!/^[\w-]+$/.test(name)) return null;
+    for (var i = 0; i < PAGE_DIRS.length; i++) {
+      try { var res = await fetch("/tmpl/" + PAGE_DIRS[i] + name + ".html", { cache: "force-cache" }); if (res.ok) return PAGE_DIRS[i] + name; } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  // Every page the router hides right now: pages with no menu entry (ui_pages) AND menu entries the
+  // firmware hides from the sidebar (class "hide" / display:none, or already revealed by Hidden Menus).
+  function hidden_page_list() {
+    var out = [], seen = {};
+    function add(hash, path, label) {
+      if (!hash || hash === "#" || seen[hash] || HIDDEN_SKIP.indexOf(hash) !== -1) return;
+      seen[hash] = true;
+      out.push({ hash: hash, path: path || "", label: (label || hash.slice(1)).trim() });
+    }
+    // a) pages the web UI can open but has no menu link for (config-derived, path known)
+    ui_pages().forEach(function (p) {
+      var links = document.querySelectorAll('a[href="' + p.hash + '"]'), vis = false;
+      for (var i = 0; i < links.length; i++) if (!in_panel(links[i]) && links[i].offsetParent !== null) vis = true;
+      if (!vis) add(p.hash, p.path, p.hash.slice(1));
+    });
+    // b) sidebar menu entries the firmware keeps hidden
+    document.querySelectorAll("#leftMenu li, #sidebarMenu li").forEach(function (li) {
+      if (in_panel(li)) return;
+      var hiddenByFw = li.classList.contains("hide") || li.style.display === "none" || li.classList.contains("zte_unhidden");
+      if (!hiddenByFw) return;
+      var a = li.querySelector('a[href^="#"]');
+      if (a) add(a.getAttribute("href"), "", a.textContent || a.getAttribute("href").slice(1));
+    });
+    return out;
+  }
+
+  window.zte_hidden_pages = function () {
+    var pages = hidden_page_list();
     var html = pages.length
-      ? '<div class="zte_sec" style="font-size:11px;color:#78909C;line-height:1.5;">Pages the router\'s web interface has, but does not link from its menu ' +
-        "(in the current operation mode). Some belong to features this model does not have and stay empty; " +
-        "some ask for a developer login or a licence first.</div>" +
+      ? '<div class="zte_sec" style="font-size:11px;color:#78909C;line-height:1.55;">' +
+        "<b>What this list is.</b> The web interface ships more pages than its menu shows. Two kinds end up here: pages that exist in the firmware's page list but have no menu link, " +
+        "and sidebar entries the firmware marks hidden (CSS <i>display:none</i> / a hidden class) so you never see them — TR-069 (ACS) config and Developer options are the usual ones.<br><br>" +
+        "<b>How opening works.</b> This interface is a single-page app: to show a page it loads that page's HTML template and its code module and runs them. The firmware does this with no check that the page is in the menu, " +
+        "so the panel calls the same loader directly with the page's own path. The page renders exactly as the router draws it — this is not a copy or a mock-up.<br><br>" +
+        "<b>What to expect.</b> Click a page to open it (use the normal menu to go back). Some pages belong to features this model does not have and come up empty or half-filled; " +
+        "a few ask for a developer login or a licence code first. Opening a page only shows it — the router's own access rules still decide what any control on it is allowed to change.</div>" +
         '<div class="zte_sec"><div class="zte_btn_grid">' +
         pages.map(function (p) {
-          return '<button class="zte_btn" data-hash="' + esc(p.hash) + '" title="' + esc(p.path) + '">' + esc(p.hash.slice(1)) + "</button>";
+          return '<button class="zte_btn" data-hash="' + esc(p.hash) + '" data-path="' + esc(p.path) + '" title="' + esc(p.hash) + '">' + esc(p.label) + "</button>";
         }).join("") + "</div></div>"
-      : '<div class="zte_sec" style="font-size:12px;color:#78909C;">No hidden pages found — the page list of the router\'s web interface could not be read on this firmware.</div>';
+      : '<div class="zte_sec" style="font-size:12px;color:#78909C;">No hidden pages found on this firmware.</div>';
     var ov = show_modal("Hidden pages", html);
     ov.querySelectorAll("button[data-hash]").forEach(function (b) {
-      b.onclick = function () { ov.remove(); location.hash = b.getAttribute("data-hash"); };
+      b.onclick = async function () {
+        var hash = b.getAttribute("data-hash"), known = b.getAttribute("data-path");
+        b.textContent = "…";
+        var path = await resolve_hidden_path(hash, known);
+        ov.remove();
+        var ok = path ? await force_open_page(path) : false;
+        if (ok) toast("Opened " + hash.slice(1) + " (forced past the menu). Use the menu to go back.", "ok", 7000);
+        else if (path) { location.hash = hash; }
+        else toast("Couldn't locate the page file for " + hash + " on this firmware.", "warn", 7000);
+      };
     });
   };
 
@@ -2746,6 +3068,8 @@
     // ODU antenna + GPS
     render_antenna();
     render_gnss();
+    // keep the QoS/TR-069 section in step with the WAN mode (QoS hides in bridge)
+    if (S.qos_ok || S.tr069_ok) render_dev_sec();
   }
 
   function update_session_info() {
@@ -2857,7 +3181,7 @@
       ".zte_btn{background:#FFFFFF;border:1px solid #B0BEC5;color:#37474F;border-radius:6px;padding:6px 8px;",
       "cursor:pointer;font-size:11px;text-align:center;transition:background .2s,border-color .2s;font-family:inherit;}",
       ".zte_btn:hover{background:#E3F2FD;border-color:#1976D2;color:#1976D2;}",
-      ".zte_btn.active{background:#1976D2;border-color:#1976D2;color:#fff;font-weight:700;}",
+      "#zte_panel .zte_btn.active,#zte_modal .zte_btn.active{background:#1976D2 !important;border-color:#1976D2 !important;color:#FFFFFF !important;font-weight:700;}",
       ".zte_btn.danger:hover{border-color:#C62828;color:#C62828;background:#FFEBEE;}",
       ".zte_btn.ok:hover{border-color:#2E7D32;color:#2E7D32;background:#E8F5E9;}",
       ".zte_btn.warn:hover{border-color:#E65100;color:#E65100;background:#FFF3E0;}",
@@ -3082,6 +3406,32 @@
       '<button class="zte_btn danger" id="zte_thermal_off_btn" onclick="window.zte_thermal(false)">\ud83c\udf21 Off</button>' +
       '<div id="zte_thermal_note" style="grid-column:1/-1;font-size:10px;color:#78909C;">Keep it on.</div>' +
       "</div></div>" +
+      // ── QoS + TR-069 status (shown only where the router answers) ──
+      '<div class="zte_sec" id="zte_dev_sec" style="display:none;"><div class="zte_sec_title">Remote Management &amp; QoS</div>' +
+      '<div class="zte_row" id="zte_qos_row" style="display:none;"><span class="zte_label">QoS (speed limit)</span>' +
+      '<span class="zte_value" id="zte_qos_state">\u2014</span></div>' +
+      '<div class="zte_btn_grid" id="zte_qos_btns" style="display:none;margin-bottom:6px;">' +
+      '<button class="zte_btn ok" id="zte_qos_on_btn" onclick="window.zte_qos(true)">\u2191\u2193 On\u2026</button>' +
+      '<button class="zte_btn danger" id="zte_qos_off_btn" onclick="window.zte_qos(false)">\u2191\u2193 Off</button>' +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;">Global upload/download cap. "On" asks for the limits.</div></div>' +
+      '<div class="zte_row" id="zte_qos_prof_row" style="display:none;"><span class="zte_label">QoS profile</span>' +
+      '<span class="zte_value"><select id="zte_qos_profile" onchange="window.zte_qos_profile(this.value)" ' +
+      'style="font-size:11px;padding:2px 4px;border:1px solid #B0BEC5;border-radius:4px;background:#fff;color:#37474F;"></select></span></div>' +
+      '<div class="zte_row" id="zte_tr069_row" style="display:none;"><span class="zte_label">TR-069 (remote mgmt)</span>' +
+      '<span class="zte_value" id="zte_tr069_state">\u2014</span></div>' +
+      '<div id="zte_tr069_btns" style="display:none;">' +
+      '<div style="font-size:10px;color:#78909C;margin:2px 0;">TR-069 / CWMP (master)</div>' +
+      '<div class="zte_btn_grid">' +
+      '<button class="zte_btn ok" id="zte_tr069_on_btn" onclick="window.zte_tr069(true)">\ud83c\udf10 On</button>' +
+      '<button class="zte_btn danger" id="zte_tr069_off_btn" onclick="window.zte_tr069(false)">\ud83c\udf10 Off</button>' +
+      "</div>" +
+      '<div style="font-size:10px;color:#78909C;margin:6px 0 2px;">Periodic inform (reports to the ACS)</div>' +
+      '<div class="zte_btn_grid">' +
+      '<button class="zte_btn ok" id="zte_tr069_inform_on_btn" onclick="window.zte_tr069_inform(true)">\ud83d\udd14 On</button>' +
+      '<button class="zte_btn danger" id="zte_tr069_inform_off_btn" onclick="window.zte_tr069_inform(false)">\ud83d\udd14 Off</button>' +
+      "</div>" +
+      '<div style="font-size:10px;color:#78909C;margin-top:6px;">Remote management (ACS). Works even where the router hides the TR-069 page. The ACS password is handled by the router\u2019s own code \u2014 the panel never reads it. Periodic inform only matters while CWMP is on.</div></div>' +
+      "</div>" +
       // ── TIP ──
       (CFG.bmac
         ? '<div class="zte_sec" style="text-align:center;background:#FFF8E1;border-color:#FFE082;">' +
@@ -3167,6 +3517,8 @@
     setTimeout(update_arp_state, 8000); // one read; afterwards only when the ARP proxy is switched
     setTimeout(load_ant_ui, 3000); // antenna options + names from the router's own UI (once)
     setTimeout(load_band_caps, 2500); // the bands this router has (once)
+    setTimeout(load_qos_cap, 4000); // QoS support (once)
+    setTimeout(load_tr069_cap, 4500); // TR-069 state (once)
     start_hidden_menus();
     toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");
   }

@@ -44,13 +44,14 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 | **GPS** | Whether the router has GPS, and its position with a map link. Says "not available on this router" when it has none |
 | **WiFi** | Radio info, transmit power, country. Hidden on routers without WiFi (outdoor units such as the MC7530) |
 | **Hidden settings** | Session timeout (how long until the router logs you out) and temperature control. Each is shown only if the router supports it |
-| **Login & tools** | Optional auto login, developer login, copy a signal report, hidden menus and hidden pages of the router's own web interface |
+| **Remote management & QoS** | QoS global speed cap (upload/download limit) with the router's own priority profiles read live from it (automatic, game, web page, video), and TR-069 (ACS) control: turn CWMP on or off, and turn Periodic Inform on or off, with both states shown. QoS appears only in router mode; both appear only where the router answers |
+| **Login & tools** | Optional auto login, developer login, copy a signal report, hidden menus, and hidden pages of the router's own web interface — which the panel can open even when the firmware links no menu entry for them |
 
 **Full edition only:** API finder (searches the router's own web code for a keyword), call recorder (logs the calls the router's pages make), custom ubus call, raw netinfo dump, raw scan data, 5G NSA lock probe.
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, GPS, WiFi, hidden settings) were also checked on an **MC8532B**. GPS, antenna selection and the band lists were also checked on a **G5TC** (B07 firmware). The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, GPS, WiFi, hidden settings) were also checked on an **MC8532B**. GPS, antenna selection and the band lists were also checked on a **G5TC** (B07 firmware). QoS, the TR-069 toggles and opening hidden pages were checked on the MC8532B and the G5TC. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
 
 ## Things to know before you click
 
@@ -61,7 +62,9 @@ Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, 
 - **Locking to a cell of another operator** leaves the router without service until you unlock it. A cell lock takes effect after you switch network mode or reboot.
 - **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable.
 - **ARP proxy** is a hidden setting of the firmware. The router accepts the switch only in a developer session, so the panel asks for the router password if none is saved. The panel shows the stored setting; if nothing changes on your network after switching, reboot the router.
-- **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline), and **Hidden pages** lists pages it has but does not link. Both only change what the page displays. Some of these belong to features your model does not have, so a page may be empty or its settings may do nothing.
+- **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline). **Hidden pages** lists pages the firmware has but links no menu entry for — such as the TR-069 config and Developer options pages — and can open them: the web interface is a single-page app that loads a page without checking the menu, so the panel asks it to load the page directly and the router draws it as it normally would. Some of these belong to features your model does not have, so a page may come up empty; opening a page only displays it — the router's own access rules still decide what any control on it may change.
+- **QoS** sets one global speed cap for the whole router (an upload and a download limit) using the firmware's own priority profiles, whose names are read live from the router. It is a router-mode feature, so the panel hides it in bridge mode, and shows it only on models that answer the QoS calls.
+- **TR-069 (ACS)** is how an operator manages the router remotely. The panel can turn CWMP on or off and turn Periodic Inform on or off independently, and shows both states. It never reads or handles the ACS password — changes round-trip through the firmware's own functions, which keep the password inside the router. It is shown only where the router answers.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
 - **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic switching* in normal use. A change may ask for the router password (developer session) and lasts until the next reboot.
 - **Temperature control** is the firmware's protection against overheating; keep it on. If you turn it off, the router turns it back on after a restart.
