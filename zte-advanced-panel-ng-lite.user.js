@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.29
+// @version      2026-ng1.30
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.29",
+    version: "2026-ng1.30",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -99,7 +99,8 @@
     // Hours between automatic IP reassignment (Very/Wind SIMs reconnect every 4h).
     // Set to 0 to disable the countdown display.
     ip_cycle_hours: 4,
-    // Bands used for "Remove band lock" (= lock to all of these). Adjust to your model.
+    // The panel reads the band lists from the router itself. These two lists are used only if
+    // the router does not report its own ("Remove band lock" = lock to all of these).
     lte_all_bands: [1, 3, 7, 8, 20, 28, 38, 40, 41, 42, 43],
     nr_all_bands: ["1", "3", "7", "8", "20", "28", "38", "40", "41", "75", "77", "78"],
   };
@@ -681,10 +682,88 @@
     });
     return out;
   }
+  // ── The bands this router has ──
+  // The router keeps its factory band lists in uci zwrt_zte_nwinfo / default_band_lock, e.g. on a G5TC:
+  //   default_lte_ext_band_lock   "1,3,7,8,20,28,38"
+  //   default_nr5g_sa_band_lock   "1,3,7,28,75,78"
+  //   default_nr5g_nsa_band_lock  "1,3,7,28,75,78"
+  // These are what "no band lock" means on that model. The panel uses them for the band buttons,
+  // for the "Unlocked" status, for "Remove band lock", and to refuse bands the router does not have.
+  // CFG.lte_all_bands / CFG.nr_all_bands are only a fallback for firmware that reports no such list.
+  var UCI_BAND_DEFAULTS = { service: "uci", method: "get", params: { config: "zwrt_zte_nwinfo", section: "default_band_lock" } };
+
+  // "1,3,7" → ["1", "3", "7"] (numbers only, ascending, no duplicates)
+  function band_list(v) {
+    var seen = {};
+    return String(v || "").split(/[,+\s]+/).map(strip_n).filter(function (b) {
+      if (!/^\d+$/.test(b) || seen[b]) return false;
+      seen[b] = true;
+      return true;
+    }).sort(function (a, b) { return a - b; });
+  }
+  // S.bands = { lte, nr_sa, nr_nsa } as reported by the router (empty lists if it reports none)
+  function lte_from_router() { return !!(S.bands && S.bands.lte.length); }
+  function nr_from_router() { return !!(S.bands && (S.bands.nr_sa.length || S.bands.nr_nsa.length)); }
+  function lte_avail() {
+    return lte_from_router() ? S.bands.lte : CFG.lte_all_bands.map(String);
+  }
+  // which: "sa", "nsa", or nothing for every 5G band the router has
+  function nr_avail(which) {
+    if (!nr_from_router()) return CFG.nr_all_bands.map(String);
+    var b = S.bands;
+    if (which === "sa") return b.nr_sa.length ? b.nr_sa : b.nr_nsa;
+    if (which === "nsa") return b.nr_nsa.length ? b.nr_nsa : b.nr_sa;
+    return band_list(b.nr_sa.concat(b.nr_nsa).join(","));
+  }
+  // One read at start; asked again before a band action if the router did not answer then.
+  async function load_band_caps() {
+    if (S.bands_loaded || S.bands_busy) return;
+    S.bands_busy = true;
+    try {
+      var r = await ubusRetry(UCI_BAND_DEFAULTS, { quiet: true });
+      if (r.accessDenied) return;
+      var v = uci_values(r) || {};
+      var lte = band_list(v.default_lte_ext_band_lock);
+      if (!lte.length && v.default_lte_band_lock) lte = (lte_bands_from_mask(v.default_lte_band_lock) || []).map(String);
+      S.bands = { lte: lte, nr_sa: band_list(v.default_nr5g_sa_band_lock), nr_nsa: band_list(v.default_nr5g_nsa_band_lock) };
+      S.bands_loaded = true;
+      render_band_chips();
+    } catch (e) { /* keep the built-in lists */ } finally {
+      S.bands_busy = false;
+    }
+  }
+
+  // Band buttons: one per band the router has, then the usual combinations that it can do.
+  var BAND_PRESETS = {
+    lte: { singles: ["1", "3", "7", "8", "20", "28"], combos: ["1+3", "1+3+7", "1+3+20", "1+3+7+20", "3+20"] },
+    nr: { singles: ["1", "3", "7", "28", "38", "75", "78"], combos: ["28+75", "38+78", "3+38+78", "28+78", "78+28+75"] },
+  };
+  function band_chips(kind) {
+    var lte = kind === "lte";
+    var avail = lte ? lte_avail() : nr_avail();
+    var known = lte ? lte_from_router() : nr_from_router();
+    var singles = known ? avail : BAND_PRESETS[kind].singles;
+    var combos = BAND_PRESETS[kind].combos.filter(function (c) {
+      return c.split("+").every(function (b) { return avail.indexOf(b) > -1; });
+    });
+    var prefix = lte ? "B" : "N", fn = lte ? "window.zte_lte_band" : "window.zte_nr_band";
+    function one(b) { return chip(prefix + b, fn + "('" + b + "')"); }
+    return '<div class="zte_bandrow">' + singles.map(one).join("") + "</div>" +
+      '<div class="zte_bandrow">' + combos.map(one).join("") + chip("✏ Custom", fn + "(null)") + "</div>";
+  }
+  function render_band_chips() {
+    zhtml("zte_lte_chips", band_chips("lte"));
+    zhtml("zte_nr_chips", band_chips("nr"));
+  }
+  // Bands of `list` that this router does not have (only when the router reported its bands)
+  function bands_missing(list, avail, known) {
+    return known ? list.filter(function (b) { return avail.indexOf(String(b)) === -1; }) : [];
+  }
+
   // Bands of a lock field, or null when it is empty / contains every band (= no lock)
-  function nr_locked_list(v) {
+  function nr_locked_list(v, which) {
     var l = String(v || "").split(",").map(strip_n).filter(Boolean);
-    var all = CFG.nr_all_bands.every(function (b) { return l.indexOf(b) > -1; });
+    var all = nr_avail(which).every(function (b) { return l.indexOf(b) > -1; });
     return l.length && !all ? l : null;
   }
   function band_set(v) {
@@ -748,14 +827,15 @@
     return res;
   }
 
-  async function send_nr_bands(bands, label) {
+  // nsaBands: only when the NSA list must differ from the SA one (the router's two default lists)
+  async function send_nr_bands(bands, label, nsaBands) {
     toast(label + "…", "info");
     var sa = await nr_lock_apply("sa", bands);
     if (!sa.ok) {
       toast(label + " failed" + (sa.error ? " (" + sa.error + ")" : ""), "error");
       return false;
     }
-    var nsa = await nr_lock_apply("nsa", bands);
+    var nsa = await nr_lock_apply("nsa", nsaBands || bands);
     poll_once();
     if (!sa.checked) {
       toast(label + " sent, but the panel could not confirm it was saved.", "warn");
@@ -1247,11 +1327,15 @@
   };
 
   // ── GPS ──
-  // Exactly what the router's own Device details page does (service_rpc.js):
-  //   zwrt_gnss / get_location_info {}  →  gnss_lat, gnss_lon
-  // One call shortly after start and one each time you press "🛰 Refresh GPS".
+  // Exactly what the router's own Device details page does (service_rpc.js). Which call that is
+  // depends on the firmware:
+  //   MC7530:  zwrt_gnss / get_location_info {}             →  gnss_lat, gnss_lon
+  //   G5TC:    uci get zwrt_zte_topsw_gnss_gen / INFO      →  LAT, LON
+  //            (it has no zwrt_gnss service: the call above answers "Object not found")
+  // One read shortly after start and one each time you press "🛰 Refresh position".
   // No background search and no guessed calls.
   var GPS_CALL = { service: "zwrt_gnss", method: "get_location_info", params: {} };
+  var GPS_UCI = { service: "uci", method: "get", params: { config: "zwrt_zte_topsw_gnss_gen", section: "INFO" } };
 
   function gps_num(v) {
     if (v === null || v === undefined) return null;
@@ -1260,6 +1344,11 @@
   }
   function gps_empty(v) {
     return v === null || v === undefined || String(v).trim() === "";
+  }
+  // two plain numbers, and not the 0/0 some firmware reports for "no position"
+  function gps_ok(lat, lon) {
+    var la = gps_num(lat), lo = gps_num(lon);
+    return la !== null && lo !== null && !(la === 0 && lo === 0);
   }
 
   // Fallback, used only if the router returns the position in a non-numeric (encoded) form:
@@ -1284,6 +1373,25 @@
       var t = setTimeout(function () { fin(null); }, 8000);
       try { svc.getDeviceInfo({}, fin, function () { fin(null); }); } catch (e) { fin(null); }
     });
+  }
+
+  // For firmware without the zwrt_gnss service. Returns
+  //   { lat, lon, src }        a position
+  //   { nofix: true }          the router keeps a position record, but it is empty
+  //   null                     no position source at all → this router has no GPS
+  async function gps_alt_position() {
+    var has_record = false;
+    try {
+      var v = uci_values(await ubusRetry(GPS_UCI, { quiet: true }));
+      if (v && (v.LAT !== undefined || v.LON !== undefined)) {
+        has_record = true;
+        if (gps_ok(v.LAT, v.LON)) return { lat: v.LAT, lon: v.LON, src: "uci zwrt_zte_topsw_gnss_gen" };
+      }
+    } catch (e) { /* try the page */ }
+    // last resort: what the router's own page code reports (its Device details page)
+    var info = await router_device_info();
+    if (info && gps_ok(info.lat, info.lon)) return { lat: info.lat, lon: info.lon, src: "the router's own page" };
+    return has_record ? { nofix: true } : null;
   }
 
   // Every answer is also kept in S.gps, and a position seen once is kept as the last
@@ -1313,6 +1421,23 @@
     function say(msg, type) { if (manual) toast(msg, type); }
     try {
       var r = await ubusRetry(GPS_CALL, { quiet: true });
+      if (!r.success && !r.accessDenied && gps_service_absent(r.error)) {
+        // no zwrt_gnss service: either a firmware that keeps the position elsewhere, or no GPS
+        var alt = await gps_alt_position();
+        if (alt && !alt.nofix) {
+          S.gps = { state: "pos" };
+          S.gps_last = { lat: String(alt.lat).trim(), lon: String(alt.lon).trim() };
+          render_gps(S.gps_last.lat, S.gps_last.lon);
+          say("GPS position updated ✓", "ok");
+          return;
+        }
+        if (alt) {
+          S.gps = { state: "nofix", err: "no coordinates stored" };
+          render_gps(null, null, "no GPS fix right now");
+          say("The router has no GPS position right now. Try again later.", "warn");
+          return;
+        }
+      }
       if (!r.success) {
         var why = r.accessDenied ? "refused by the router" : "not available (" + (r.error || "?") + ")";
         S.gps = { state: "error", err: "get_location_info " + (r.accessDenied ? "refused" : (r.error || "?")) };
@@ -1696,13 +1821,15 @@
   // MC7530 they stayed at 0 / no fix even while the router returned a position.
   // That config is read once (at start and on "Check again"), only to tell "no position yet"
   // from "not available".
-  // Does this router have GPS? The one reliable signal is the position call itself
-  // (zwrt_gnss.get_location_info). The uci zwrt_zte_gnss config is NOT used: an MC8532B keeps
-  // those sections but has no GPS, and the call returns "Object not found".
+  // Does this router have GPS? The reliable signal is whether a position source answers:
+  // zwrt_gnss.get_location_info, or — on firmware without that service (G5TC) — the position
+  // record in uci zwrt_zte_topsw_gnss_gen. The uci zwrt_zte_gnss config is NOT used: an MC8532B
+  // keeps those sections but has no GPS, and get_location_info returns "Object not found".
   //   yes:  it returned coordinates (now or earlier this session; the MC7530 sends them
   //         encrypted and its own page decodes them — still a position)
   //   open: the call works but gave no coordinates yet (no fix), or only an undecodable value
-  //   no:   the call reports the service is absent (Object/Method not found) → not available
+  //   no:   the service is absent (Object/Method not found) and there is no other position
+  //         source either → not available
   function gps_service_absent(err) {
     return /not\s*found|no\s*object|unknown|invalid (object|command)/i.test(String(err || ""));
   }
@@ -1870,8 +1997,10 @@
     });
   };
 
-  window.zte_lte_band = function (bands) {
-    if (!bands) bands = prompt("LTE bands (e.g. 1+3+20)\nType AUTO to remove the LTE band lock.", "AUTO");
+  window.zte_lte_band = async function (bands) {
+    await load_band_caps();
+    if (!bands) bands = prompt("LTE bands (e.g. 1+3+20)\n" + (lte_from_router() ? "This router has: B" + lte_avail().join(", B") + "\n" : "") +
+      "Type AUTO to remove the LTE band lock.", "AUTO");
     if (!bands) return;
     if (bands.trim().toUpperCase() === "AUTO") return window.zte_lte_band_unlock(true);
     var list = parse_band_input(bands);
@@ -1879,17 +2008,27 @@
       toast("Invalid band input — use e.g. 1+3+7 or AUTO", "error");
       return;
     }
+    var missing = bands_missing(list, lte_avail(), lte_from_router());
+    if (missing.length) {
+      toast("This router does not have B" + missing.join(", B") + ".\nIt has: B" + lte_avail().join(", B"), "error", 9000);
+      return;
+    }
     return send_lte_mask(lte_mask_from_bands(list), "LTE bands B" + list.join("+B"));
   };
 
-  window.zte_lte_band_unlock = function (skipConfirm) {
-    if (!skipConfirm && !confirm("Remove LTE band lock?\n\nLocks to all bands: B" + CFG.lte_all_bands.join(", B")))
+  window.zte_lte_band_unlock = async function (skipConfirm) {
+    await load_band_caps();
+    var all = lte_avail();
+    if (!skipConfirm && !confirm("Remove LTE band lock?\n\nLocks to all bands " +
+      (lte_from_router() ? "of this router" : "in the panel's built-in list") + ": B" + all.join(", B")))
       return;
-    return send_lte_mask(lte_mask_from_bands(CFG.lte_all_bands), "LTE band lock removed");
+    return send_lte_mask(lte_mask_from_bands(all), "LTE band lock removed");
   };
 
-  window.zte_nr_band = function (bands) {
-    if (!bands) bands = prompt("5G NR bands (e.g. 78+28)\nType AUTO to remove the NR band lock.", "AUTO");
+  window.zte_nr_band = async function (bands) {
+    await load_band_caps();
+    if (!bands) bands = prompt("5G NR bands (e.g. 78+28)\n" + (nr_from_router() ? "This router has: n" + nr_avail().join(", n") + "\n" : "") +
+      "Type AUTO to remove the NR band lock.", "AUTO");
     if (!bands) return;
     if (bands.trim().toUpperCase() === "AUTO") return window.zte_nr_band_unlock(true);
     var list = parse_band_input(bands);
@@ -1897,13 +2036,21 @@
       toast("Invalid band input — use e.g. 78+28 or AUTO", "error");
       return;
     }
+    var missing = bands_missing(list, nr_avail(), nr_from_router());
+    if (missing.length) {
+      toast("This router does not have n" + missing.join(", n") + ".\nIt has: n" + nr_avail().join(", n"), "error", 9000);
+      return;
+    }
     return send_nr_bands(list, "5G bands n" + list.join("+n"));
   };
 
   window.zte_nr_band_unlock = async function (skipConfirm) {
-    if (!skipConfirm && !confirm("Remove NR (5G) band lock?\n\nLocks to all bands: n" + CFG.nr_all_bands.join(", n")))
+    await load_band_caps();
+    var sa = nr_avail("sa"), nsa = nr_avail("nsa");
+    if (!skipConfirm && !confirm("Remove NR (5G) band lock?\n\nLocks to all bands " +
+      (nr_from_router() ? "of this router" : "in the panel's built-in list") + ": n" + nr_avail().join(", n")))
       return;
-    await send_nr_bands(CFG.nr_all_bands, "NR band lock removed");
+    await send_nr_bands(sa, "NR band lock removed", nsa);
   };
 
   window.zte_unlock_all_bands = async function () {
@@ -2550,7 +2697,7 @@
 
     // LTE band lock
     var lb = d.lte_band_lock ? lte_bands_from_mask(d.lte_band_lock) : null;
-    var allLte = CFG.lte_all_bands.every(function (b) { return lb && lb.indexOf(b) > -1; });
+    var allLte = lte_avail().every(function (b) { return lb && lb.indexOf(Number(b)) > -1; });
     zhtml("zte_lte_band_lock_status", !lb || !lb.length || allLte
       ? '<span style="color:#78909C;">Unlocked</span>'
       : '<span style="color:#E65100;">🔒 B' + lb.join(" + B") + "</span>");
@@ -2559,7 +2706,7 @@
     // Unlocked → just "Unlocked"; locked → only the locked bands. Raw values are in the tooltip.
     var nrFields = nr_lock_fields(d);
     var nrTip = Object.keys(nrFields).map(function (k) { return k + "=" + (nrFields[k] || "(empty)"); }).join("\n");
-    var saL = nr_locked_list(d.nr5g_sa_band_lock), nsaL = nr_locked_list(d.nr5g_nsa_band_lock);
+    var saL = nr_locked_list(d.nr5g_sa_band_lock, "sa"), nsaL = nr_locked_list(d.nr5g_nsa_band_lock, "nsa");
     var nrTxt = "";
     if (saL && nsaL && saL.join() === nsaL.join()) nrTxt = "n" + saL.join(" + n");
     else nrTxt = [saL ? "SA n" + saL.join(" + n") : "", nsaL ? "NSA n" + nsaL.join(" + n") : ""].filter(Boolean).join(" · ");
@@ -2823,12 +2970,7 @@
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
       '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">LTE Bands</span>' +
       '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_lte_band_lock_status" style="font-weight:700">—</span></span></div>' +
-      '<div class="zte_bandrow">' +
-      ["1", "3", "7", "8", "20", "28", "1+3", "1+3+7", "1+3+20", "1+3+7+20", "3+20"].map(function (b) {
-        return chip("B" + b, "window.zte_lte_band('" + b + "')");
-      }).join("") +
-      chip("✏ Custom", "window.zte_lte_band(null)") +
-      "</div>" +
+      '<div id="zte_lte_chips">' + band_chips("lte") + "</div>" +
       '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_lte_band_unlock()">🔓 Remove LTE Band Lock</button>' +
       "</div>" +
       // ── 5G BANDS ──
@@ -2836,12 +2978,7 @@
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
       '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">5G Bands (NR)</span>' +
       '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_nr_band_lock_status" style="font-weight:700">—</span></span></div>' +
-      '<div class="zte_bandrow">' +
-      ["1", "3", "7", "28", "38", "75", "78", "28+75", "38+78", "3+38+78", "28+78", "78+28+75"].map(function (b) {
-        return chip("N" + b, "window.zte_nr_band('" + b + "')");
-      }).join("") +
-      chip("✏ Custom", "window.zte_nr_band(null)") +
-      "</div>" +
+      '<div id="zte_nr_chips">' + band_chips("nr") + "</div>" +
       '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_nr_band_unlock()">🔓 Remove NR Band Lock</button>' +
       "</div>" +
       // ── GLOBAL RESET ──
@@ -3013,6 +3150,7 @@
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
     setTimeout(update_arp_state, 8000); // one read; afterwards only when the ARP proxy is switched
     setTimeout(load_ant_ui, 3000); // antenna options + names from the router's own UI (once)
+    setTimeout(load_band_caps, 2500); // the bands this router has (once)
     start_hidden_menus();
     toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");
   }

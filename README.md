@@ -37,7 +37,7 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 | **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
 | **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, ARP proxy on/off, reboot |
 | **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
-| **LTE bands / 5G bands** | One-click band locks with live status. A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
+| **LTE bands / 5G bands** | One-click band locks with live status. The buttons show the bands your router has (read from the router), and a band it does not have is refused. A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
 | **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks |
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
 | **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
@@ -50,14 +50,14 @@ The script runs on `192.168.0.1`, `192.168.1.1`, `192.168.8.1` and `192.168.254.
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, GPS, WiFi, hidden settings) were also checked on an **MC8532B**. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+Tested on a **ZTE MC7530**; the sections that depend on the model (ODU antenna, GPS, WiFi, hidden settings) were also checked on an **MC8532B**. GPS, antenna selection and the band lists were also checked on a **G5TC** (B07 firmware). The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
 
 ## Things to know before you click
 
 - **Everything stays local.** The script only talks to your router. The only outside links are the ones you click yourself (the map link and the tip links).
 - **You log in on the router's own page.** The panel starts once you are in and pauses whenever you are logged out.
 - **Auto login is optional and off by default.** If you turn it on (🔑 Auto Login), a SHA-256 hash of the router password is kept in the browser's storage for the router's address. Anyone who can use that browser profile can then open the router page, and the hash itself is enough to log in — so do not turn it on on a shared computer. "Forget Password" removes it.
-- **Band and cell locks stay in place** until you remove them. "Remove band lock" works by locking to the list of all bands in the `CFG` block — adjust that list to your model.
+- **Band and cell locks stay in place** until you remove them. "Remove band lock" works by locking to all bands of your router. The panel reads that list from the router; only if the router reports none does it use the lists in the `CFG` block.
 - **Locking to a cell of another operator** leaves the router without service until you unlock it. A cell lock takes effect after you switch network mode or reboot.
 - **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable.
 - **ARP proxy** is a hidden setting of the firmware. The router accepts the switch only in a developer session, so the panel asks for the router password if none is saved. The panel shows the stored setting; if nothing changes on your network after switching, reboot the router.
@@ -87,8 +87,8 @@ var CFG = {
   bmac: true,              // false hides the tip box
   pollInterval: 1000,      // ms between signal refreshes
   ip_cycle_hours: 4,       // countdown to the operator's IP renewal; 0 hides it
-  lte_all_bands: [...],    // bands used by "Remove LTE band lock"
-  nr_all_bands: [...],     // bands used by "Remove NR band lock"
+  lte_all_bands: [...],    // used only if the router does not report its own LTE bands
+  nr_all_bands: [...],     // used only if the router does not report its own 5G bands
 };
 ```
 
