@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.34
+// @version      2026-ng1.35
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -31,6 +31,9 @@
  * Port and modifications: papatsonis, 2026 — https://github.com/papatsonis/zte-advanced-router-panel-ng
  * This is a modified work. It is not maintained or endorsed by the original
  * authors; please do not ask them for support for this version.
+ *
+ * Copyright (C) 2026 papatsonis. Portions (C) Cerix (MIT) and Thomas
+ * Pöchtrager (AGPLv3-or-later); see the third-party notices below.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Affero General Public License as published by
@@ -85,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.34",
+    version: "2026-ng1.35",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -3688,7 +3691,7 @@
           "</div>"
         : "") +
       "</div>" +
-      '<div id="zte_footer">ZTE Panel NG v' + CFG.version + " · based on Cerix's panel and ZTE-Script-NG · AGPLv3 · drag header to move</div>";
+      '<div id="zte_footer">ZTE Panel NG v' + CFG.version + " · by papatsonis · based on Cerix's panel and ZTE-Script-NG · AGPLv3 · drag header to move</div>";
 
     document.body.appendChild(panel);
     make_draggable(panel);

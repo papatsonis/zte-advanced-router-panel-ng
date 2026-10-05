@@ -2,7 +2,7 @@
 
 A floating control panel for **newer ZTE 4G/5G routers** — the ones whose web interface talks to the router through the ubus JSON-RPC API (ZTE MC7520, MC7523/G5TC, MC7530 and later). It is a userscript: it runs inside the router's own web page and adds signal details, band and cell locking, a neighbor scan, bridge mode, DNS, traffic statistics and more.
 
-This is a port of [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advanced-router-panel) by **Cerix** to the newer router API, built on the API calls of [ZTE-Script-NG](https://github.com/tpoechtrager/ZTE-Web-Script) by **Thomas Pöchtrager**. See [Credits](#credits).
+This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advanced-router-panel) design by **Cerix** to the newer **ubus** routers, built on the ubus foundation of [ZTE-Script-NG](https://github.com/tpoechtrager/ZTE-Web-Script) by **Thomas Pöchtrager**, and adds a large set of controls on top. Ported and extended by **[papatsonis](https://github.com/papatsonis)** — see [What this fork adds](#what-this-fork-adds) and [Credits](#credits).
 
 > **Older routers (MC888, MC889, MC7010 …)** use a different API. For those, use [Cerix's original panel](https://github.com/Cerix/zte-advanced-router-panel) or the [legacy ZTE-Script](https://github.com/tpoechtrager/ZTE-Web-Script).
 
@@ -106,10 +106,47 @@ python3 tools/build_lite.py
 
 The build stops with an error if the full script has changed in a way it does not expect, rather than producing a broken Lite edition.
 
+## What this fork adds
+
+This fork brings together **Cerix's panel** (designed for ZTE's older routers) and the **ubus foundation of ZTE-Script-NG** (a monitoring-and-locking panel for the newer G5TC-and-later models), then extends it with a large set of **control** features — tested across the MC7530, MC8532B and G5TC.
+
+From ZTE-Script-NG it inherits the ubus groundwork: signal monitoring, band and cell locking, network-mode switching, traffic statistics, device info, WiFi and login handling.
+
+On top of that, this fork adds the following — all capability-gated, so a control appears only if the router answers for it:
+
+- **Connection controls** — reconnect mobile data, DNS settings, bridge mode on/off, reboot.
+- **ARP proxy** on/off.
+- **Neighbor scan & force connect** — run the router's scan and lock to any cell it finds.
+- **APN** — view and switch profile.
+- **ODU antenna selection** — option names read from the router's own developer page.
+- **GPS / GNSS** — including models that lack the `zwrt_gnss` service.
+- **Session timeout** and **temperature control**.
+- **Band lists read from the router**, so only bands your model supports are offered.
+- **QoS** — a global speed cap with the router's own priority profiles, read live.
+- **TR-069 (ACS)** — CWMP and Periodic Inform toggles, without the panel ever handling the ACS password.
+- **Hidden menus & pages** — reveals, and can open, pages the firmware hides (TR-069 config, Developer options).
+- **Collapsible sections**, remembered per router.
+- **Two editions** — Lite (everyday) and Full (adds API-exploration tools), with Lite generated from Full by a build script.
+
+### Version history
+
+- **1.35** — credits and authorship (this section, header and footer).
+- **1.34** — removed a redundant 5G carrier badge; ARP proxy shows its default.
+- **1.33** — collapsible sections, remembered per router.
+- **1.32** — QoS speed cap, TR-069 (CWMP + Periodic Inform) toggles, opening firmware-hidden pages.
+- **1.31** — band buttons driven by the router's supported-band list, with a "Supported bands" line.
+- **1.30** — GPS on models without `zwrt_gnss` (e.g. G5TC); band lists read from the router.
+- **1.29** — reliable detection of a lost session on firmware that answers some calls without login.
+- **1.28** — ODU antenna selection; GPS presence; session timeout; temperature control.
+- **1.27** — ARP proxy on/off; hidden menus and hidden pages.
+- **1.25** — fixed the logout right after login; safer auto-login.
+- **1.21** — first public release on GitHub. Development began earlier at 1.0; pre-1.21 builds were private. At 1.21 the fork already had signal, band/cell lock, network mode, neighbor scan, bridge mode, DNS, APN, traffic stats, GPS, WiFi, auto-login, and the developer tools.
+
 ## Credits
 
 This panel exists because of other people's work:
 
+- **[papatsonis](https://github.com/papatsonis)** — this fork: the port to the ubus JSON-RPC API and the features in [What this fork adds](#what-this-fork-adds). Built on the work below; not maintained or endorsed by those authors.
 - **[Cerix](https://github.com/Cerix/zte-advanced-router-panel)** — *ZTE Advanced Router Panel* (MIT). The panel's design, layout and feature set come from it. Tips: [buymeacoffee.com/cerix](https://buymeacoffee.com/cerix)
 - **[Thomas Pöchtrager](https://github.com/tpoechtrager/ZTE-Web-Script)** — *ZTE-Script-NG* (AGPLv3+). The ubus calls, login flow, signal parsing and frequency tables come from it. Tips: PayPal `t.poechtrager@gmail.com`
 - **[open-u60-pro](https://github.com/jesther-ai/open-u60-pro)** by Jesther Silvestre and **[zte-u60-pro-mu5250-manager](https://github.com/faying/zte-u60-pro-mu5250-manager)** by faying (both MIT) — their research on the ZTE U60 Pro showed which ubus calls exist for the neighbor scan, mobile data on/off, DNS, APN, ARP proxy and resetting locks. Only the call and parameter names were used; no code from them is included.
