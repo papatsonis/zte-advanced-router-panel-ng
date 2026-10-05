@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.32
-// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock. Lite edition without the developer tools.
+// @version      2026-ng1.33
+// @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
 // @homepageURL  https://github.com/papatsonis/zte-advanced-router-panel-ng
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.32",
+    version: "2026-ng1.33",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -3164,6 +3164,11 @@
       "#zte_panel .zte_value,#zte_panel td,#zte_panel .zte_label,#zte_modal .zte_value{user-select:text;-webkit-user-select:text;}",
       ".zte_sec{background:#FFFFFF;border-radius:8px;padding:8px 10px;margin-bottom:8px;border:1px solid #E0E0E0;box-shadow:0 1px 3px rgba(0,0,0,.05);}",
       ".zte_sec_title{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#1976D2;margin-bottom:6px;font-weight:700;}",
+      ".zte_sec.zte_collapsible > :first-child{cursor:pointer;position:relative;padding-right:16px;}",
+      ".zte_sec.zte_collapsible > :first-child::after{content:'\\25BE';position:absolute;right:0;top:50%;transform:translateY(-50%);color:#90A4AE;font-size:10px;font-weight:700;}",
+      ".zte_sec.zte_collapsed > :first-child::after{content:'\\25B8';}",
+      ".zte_sec.zte_collapsed > :first-child{margin-bottom:0;}",
+      ".zte_sec.zte_collapsed > :not(:first-child){display:none !important;}",
       ".zte_sub{font-size:10px;color:#1976D2;font-weight:700;margin:6px 0 3px;}",
       ".zte_row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid #ECEFF1;}",
       ".zte_row:last-child{border-bottom:none;}",
@@ -3448,6 +3453,41 @@
     document.body.appendChild(panel);
     make_draggable(panel);
     make_minimizable(panel);
+    setup_collapsers(panel);
+  }
+
+  // ─────────────────────────────────────────────
+  //  COLLAPSIBLE SECTIONS (click a title to fold it; state saved per router)
+  // ─────────────────────────────────────────────
+  // Open by default; every other section starts folded. Saved choices override these.
+  var COLLAPSE_OPEN = ["Network", "LTE Signal", "5G Signal (NR)", "Connection", "Network Mode", "Traffic Statistics"];
+  function collapse_key() { return "ZtePanelCollapse:" + location.hostname; }
+  function load_collapse() { try { return JSON.parse(localStorage.getItem(collapse_key()) || "{}") || {}; } catch (e) { return {}; } }
+  function save_collapse(m) { try { localStorage.setItem(collapse_key(), JSON.stringify(m)); } catch (e) { /* ignore */ } }
+  function sec_title_text(sec) { var t = sec.querySelector(".zte_sec_title"); return t ? t.textContent.trim() : ""; }
+
+  function setup_collapsers(panel) {
+    var saved = load_collapse();
+    panel.querySelectorAll(".zte_sec").forEach(function (sec) {
+      var t = sec.querySelector(".zte_sec_title");
+      if (!t) return;                                              // e.g. the tip box has no title
+      if (!sec.firstElementChild || !sec.firstElementChild.contains(t)) return; // title must live in the header
+      sec.classList.add("zte_collapsible");
+      var key = t.textContent.trim();
+      var collapsed = Object.prototype.hasOwnProperty.call(saved, key)
+        ? !!saved[key]
+        : COLLAPSE_OPEN.indexOf(key) === -1;
+      sec.classList.toggle("zte_collapsed", collapsed);
+    });
+    panel.addEventListener("click", function (e) {
+      var sec = e.target.closest(".zte_sec.zte_collapsible");
+      if (!sec || !sec.firstElementChild || !sec.firstElementChild.contains(e.target)) return; // header clicks only
+      if (e.target.closest("button,select,a,input,textarea")) return;                           // let header controls work
+      sec.classList.toggle("zte_collapsed");
+      var m = load_collapse();
+      m[sec_title_text(sec)] = sec.classList.contains("zte_collapsed");
+      save_collapse(m);
+    });
   }
 
   // ─────────────────────────────────────────────

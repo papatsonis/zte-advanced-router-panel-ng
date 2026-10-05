@@ -54,7 +54,7 @@ LITE = VER  # both editions carry the same version number
 
 # ── Header ─────────────────────────────────────────────────────────────
 rep("// @name         ZTE Advanced Router Panel NG (ubus)", "// @name         ZTE Advanced Router Panel NG Lite (ubus)")
-rep("traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, plus developer tools.", "traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock. Lite edition without the developer tools.")
+rep("traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections, plus developer tools.", "traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections. Lite edition without the developer tools.")
 rep("/main/zte-advanced-panel-ng.user.js", "/main/zte-advanced-panel-ng-lite.user.js", count=2)  # @downloadURL, @updateURL
 rep(
     " * ZTE Advanced Router Panel NG\n *\n",
