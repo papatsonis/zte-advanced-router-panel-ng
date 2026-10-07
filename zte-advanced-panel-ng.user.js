@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.35
+// @version      2026-ng1.36
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.35",
+    version: "2026-ng1.36",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -364,11 +364,24 @@
   //     already logged in — the same thing that happens when a logged-in page is refreshed.
   //   - The panel never logs in while the router's page is running. A login made behind the
   //     page's back is not picked up by it, and a second session only gets in the way.
-  //   - Right after a Logout the saved password is not used, so that logging out works.
+  //   - Right after the user clicks Logout the saved password is not used, so that logging out
+  //     works. A logout the ROUTER forces (session timeout, another login, a write that resets
+  //     the session) is NOT a Logout click, so there the saved password IS used and the panel
+  //     logs back in on its own. The two are told apart by whether a real, user-generated click
+  //     landed on a logout control (see USER_LOGOUT_KEY / watch_logout_click below).
+  //   - Some firmwares pop a "Confirm logout?" dialog, so the actual logout can be seconds after
+  //     the Logout click. A trusted Yes/OK inside that dialog refreshes the flag (so the skip
+  //     window is measured from the confirmation, not the first click); a trusted No/Cancel
+  //     clears it (the user changed their mind — a logout the router forces later must recover).
+  //     The flag lives in localStorage ONLY: the router's page scrubs sessionStorage on its route
+  //     changes (seen live on the G5TC — a sessionStorage marker vanished while the user sat on
+  //     the confirm dialog), so sessionStorage cannot hold anything that must outlive a click.
   var PW_KEY = "ZtePanelPwHash";          // localStorage: SHA256 of the password, if saved
   var TRIED_KEY = "ZtePanelAutoLoginAt";  // sessionStorage (per tab): an automatic login + reload is under way (no reload loops)
-  var LOGOUT_KEY = "ZtePanelLogoutAt";    // localStorage: the page was left with its session token already removed
+  var USER_LOGOUT_KEY = "ZtePanelUserLogoutAt"; // localStorage: the user initiated/confirmed a logout (a deliberate logout, not a forced one)
   var SEEN_KEY = "ZtePanelSeenAlive";     // sessionStorage (per tab): time of the last successful poll
+  var USER_LOGOUT_WINDOW = 60000;         // ms after a (confirmed) Logout during which the saved password is not used
+  var LOGOUT_CONFIRM_WINDOW = 60000;      // ms after a Logout click during which a Yes/No in a confirm dialog still counts
 
   function saved_hash() {
     try { return localStorage.getItem(PW_KEY); } catch (e) { return null; }
@@ -381,10 +394,64 @@
   function stamp(storage, key) {
     try { storage.setItem(key, String(Date.now())); } catch (e) { /* ignore */ }
   }
-  // Was somebody logged in on THIS tab until a moment ago? Then the login form means "Logout".
-  // (A new tab has no such history, so there the saved password is used.)
+  // Did the user DELIBERATELY log out a moment ago? Only a real click on a logout control counts.
+  // A logout the router forces (session timeout, a write that drops the session, another login)
+  // sets no such flag, so there this returns false and the saved password is used to recover.
   function just_logged_out() {
-    return ms_since(sessionStorage, SEEN_KEY) < 10000 || ms_since(localStorage, LOGOUT_KEY) < 10000;
+    return ms_since(localStorage, USER_LOGOUT_KEY) < USER_LOGOUT_WINDOW;
+  }
+
+  // Does this element (or a close ancestor) look like the router's Logout control?
+  function is_logout_control(node) {
+    for (var el = node, hops = 0; el && el.nodeType === 1 && hops < 4; el = el.parentElement, hops++) {
+      var txt = (el.textContent || "").trim();
+      if (txt && txt.length <= 24 && /^(log\s?out|logout|sign\s?out|έξοδος|αποσύνδεση|退出|登出|注销)$/i.test(txt)) return true;
+      var attrs = ((el.id || "") + " " + (el.className || "") + " " +
+                   (el.getAttribute && (el.getAttribute("href") || "")) + " " +
+                   (el.getAttribute && (el.getAttribute("onclick") || "")) + " " +
+                   (el.getAttribute && (el.getAttribute("ng-click") || "")) + " " +
+                   (el.getAttribute && (el.getAttribute("data-action") || ""))).toLowerCase();
+      if (/log[\s_-]?out|sign[\s_-]?out/.test(attrs)) return true;
+    }
+    return false;
+  }
+
+  // Does this element (or a close ancestor) carry exactly this short label? Walking up stops at
+  // the button: a container's text is the buttons' texts joined, so it fails the exact match.
+  function el_label_is(node, re) {
+    for (var el = node, hops = 0; el && el.nodeType === 1 && hops < 4; el = el.parentElement, hops++) {
+      var txt = (el.textContent || "").trim();
+      if (txt && txt.length <= 14 && re.test(txt)) return true;
+    }
+    return false;
+  }
+  var CONFIRM_RE = /^(yes|ok|okay|confirm|sure|ναι|εντάξει|ενταξει|确定|确认|是|好)$/i;
+  var CANCEL_RE  = /^(no|cancel|όχι|οχι|άκυρο|ακυρο|取消|否)$/i;
+
+  // Watch for a genuine, user-generated click on a logout control anywhere on the router's page.
+  // event.isTrusted is true only for real user input, so a forced/programmatic logout never
+  // trips this. When it fires, remember that THIS logout was the user's own choice. If the
+  // firmware shows a "Confirm logout?" dialog, a following Yes/OK refreshes the flag and a
+  // No/Cancel clears it, so the skip window tracks the user's actual decision, not the dwell time.
+  function watch_logout_click() {
+    document.addEventListener("click", function (e) {
+      try {
+        if (!e.isTrusted) return;                 // ignore synthetic clicks (forced logouts, scripts)
+        if (is_logout_control(e.target)) {
+          stamp(localStorage, USER_LOGOUT_KEY);   // the user initiated a logout (localStorage: survives a modal dwell)
+          return;
+        }
+        // A Yes/No that follows a recent logout click is the confirm dialog's answer. The recency
+        // of USER_LOGOUT_KEY itself is the "a logout is pending" signal — no sessionStorage needed.
+        if (ms_since(localStorage, USER_LOGOUT_KEY) < LOGOUT_CONFIRM_WINDOW) {
+          if (el_label_is(e.target, CONFIRM_RE)) {
+            stamp(localStorage, USER_LOGOUT_KEY);  // confirmed — measure the skip window from now
+          } else if (el_label_is(e.target, CANCEL_RE)) {
+            try { localStorage.removeItem(USER_LOGOUT_KEY); } catch (err) { /* ignore */ } // backed out — not a logout
+          }
+        }
+      } catch (err) { /* ignore */ }
+    }, true); // capture phase, so we see it even if the page stops propagation
   }
 
   async function ask_pw_hash() {
@@ -1105,6 +1172,14 @@
     console.log("[ZTE] set_wwaniface →", JSON.stringify(body));
     return ubusRetry({ service: "zwrt_data", method: "set_wwaniface", params: body });
   }
+  // On some firmware (seen on an MC7530) turning mobile data OFF also drops the WEB session, so
+  // the "turn it back ON" step can be lost — the page reloads (auto-login / self-heal) before it
+  // runs, leaving data off. A marker survives that reload: reconnect_resume_if_pending() (called
+  // from start_panel) finishes the reconnect with the fresh session. Any normal completion of the
+  // reconnect clears the marker, so it only persists when the reconnect was actually interrupted.
+  var RECONNECT_KEY = "ZtePanelReconnectPending"; // localStorage JSON { at, connect_mode, roam_enable }
+  function reconnect_mark(cur) { try { localStorage.setItem(RECONNECT_KEY, JSON.stringify({ at: Date.now(), connect_mode: cur.connect_mode, roam_enable: cur.roam_enable })); } catch (e) { /* ignore */ } }
+  function reconnect_clear() { try { localStorage.removeItem(RECONNECT_KEY); } catch (e) { /* ignore */ } }
 
   window.zte_wan_reconnect = async function () {
     var cur = await get_wwan();
@@ -1117,8 +1192,10 @@
       "Connection returns in about 10–20 s; the router may attach to a different cell.\n\n" +
       "Current: connect_status=" + (cur.connect_status || "?") + ", connect_mode=" + cur.connect_mode + ", roaming=" + cur.roam_enable))
       return;
+    reconnect_mark(cur); // so an interrupting reload still finishes the "turn back on" step
     var off = await set_wwan(cur, 0);
     if (!off.success) {
+      reconnect_clear();
       toast(off.accessDenied ? denied_msg("mobile data on/off", "wwaniface") : "Data OFF failed (" + (off.error || "?") + ")", "error");
       return;
     }
@@ -1129,6 +1206,7 @@
       on = await set_wwan(cur, 1);
       if (!on.success) await sleep(2000);
     }
+    reconnect_clear(); // the reconnect ran to completion here (success or hard fail) — no resume needed
     if (!on.success) {
       toast("⚠️ Could not turn mobile data back ON.\nTurn it on in the router's own web page (Mobile data switch).", "error");
       return;
@@ -1145,6 +1223,37 @@
     }
     toast("Data is ON but not connected yet — give it a moment.", "warn");
   };
+
+  // Called from start_panel: if a reconnect was interrupted (its marker survived a reload), turn
+  // mobile data back on now, with the fresh session. This is what makes the MC7530 case recover.
+  async function reconnect_resume_if_pending() {
+    var raw = null; try { raw = localStorage.getItem(RECONNECT_KEY); } catch (e) { /* ignore */ }
+    if (!raw) return;
+    var st = null; try { st = JSON.parse(raw); } catch (e) { /* ignore */ }
+    if (!st || Date.now() - (st.at || 0) > 180000) { reconnect_clear(); return; } // gone or stale
+    toast("Finishing the mobile-data reconnect — turning data back on…", "info", 7000);
+    var cur = { connect_mode: st.connect_mode, roam_enable: st.roam_enable };
+    var on = null;
+    for (var i = 0; i < 3 && !(on && on.success); i++) {
+      on = await set_wwan(cur, 1);
+      if (!(on && on.success)) await sleep(2000);
+    }
+    reconnect_clear();
+    if (!(on && on.success)) {
+      toast("Could not finish the reconnect — turn mobile data on in the router's own page.", "warn", 10000);
+      return;
+    }
+    for (var k = 0; k < 12; k++) {
+      await sleep(2000);
+      var s = await get_wwan();
+      if (s && /^(connected|ipv4|ipv6)/i.test(String(s.connect_status || ""))) {
+        toast("Mobile data is back on ✓ (" + s.connect_status + ")", "ok");
+        poll_once();
+        return;
+      }
+    }
+    toast("Mobile data turned on — waiting for the connection…", "info");
+  }
 
   // ── Reset band + cell locks to firmware defaults ──
   window.zte_reset_band_cell = async function () {
@@ -1362,10 +1471,7 @@
     if (!c) return;
     var pci = parseInt(c.pci, 10), ch = parseInt(c.earfcn, 10);
     if (c.type === "LTE") {
-      if (!confirm("Lock LTE cell PCI " + pci + ", EARFCN " + ch + "?\n\n⚠️ If this cell belongs to another operator the router will have no service until you unlock.\n" + APPLY_HINT.trim()))
-        return;
-      if (await run_action("LTE cell lock " + pci + "," + ch, function () { return lte_cell_call(pci, ch); }))
-        toast("LTE cell lock set." + APPLY_HINT, "info");
+      await window.zte_guided_lte_lock(pci, ch); // staged LTE-Only → lock → restore (its own confirm)
     } else {
       var conv = nr_arfcn_to_mhz(ch);
       var band = strip_n(c.band) || (conv ? String(conv.band) : "");
@@ -2173,12 +2279,11 @@
   }
 
   function render_sys_settings() {
-    var any = S.login_timeout_ok || S.thermal_ok;
-    ztoggle("zte_sys_sec", !!any);
-    ztoggle("zte_sys_timeout_row", !!S.login_timeout_ok);
+    ztoggle("zte_sys_timeout_row", !!S.login_timeout_ok);     // lives in "Login"
+    ztoggle("zte_sys_timeout_btns", !!S.login_timeout_ok);
+    ztoggle("zte_thermal_sec", !!S.thermal_ok);               // its own section in "Advanced Tools"
     if (S.login_timeout_ok) zhtml("zte_sys_timeout", (S.login_timeout > 0 ? esc(fmt_timeout(S.login_timeout)) +
       ' <span style="font-size:10px;color:#78909C;font-weight:400">(' + S.login_timeout + " s)</span>" : "—"));
-    ztoggle("zte_sys_thermal_row", !!S.thermal_ok);
     if (S.thermal_ok) {
       if (S.thermal_label) zset("zte_thermal_label", S.thermal_label);
       if (S.thermal_info) zset("zte_thermal_note", S.thermal_info);
@@ -2513,8 +2618,7 @@
       return;
     }
     if (+p[0] < 0 || +p[0] > 503) { toast("PCI must be between 0 and 503", "error"); return; }
-    if (await run_action("LTE cell lock " + p.join(","), function () { return lte_cell_call(p[0], p[1]); }))
-      toast("LTE cell lock set." + APPLY_HINT, "info");
+    await window.zte_guided_lte_lock(p[0], p[1]); // staged LTE-Only → lock → restore (see GUIDED LTE CELL LOCK)
   };
 
   window.zte_nr_cell_lock = async function (reset) {
@@ -2537,6 +2641,141 @@
     if (await run_action("5G cell lock " + p.join(","), function () { return nr_cell_call(p[0], p[1], p[2]); }))
       toast("5G cell lock set." + APPLY_HINT, "info");
   };
+
+  // ─────────────────────────────────────────────
+  //  GUIDED LTE CELL LOCK (staged: LTE-Only → lock → restore the previous mode)
+  //  An LTE cell lock applied in NSA/auto freezes the control plane (an ENDC teardown loop).
+  //  Applied while on LTE-Only it takes cleanly. This routine stages that switch and restores
+  //  the mode you were in. Progress is persisted in localStorage: if the router drops the web
+  //  session, the auto-login recovery reloads the page and the routine resumes where it stopped.
+  //  LTE cells only (5G cell locks stay direct).
+  // ─────────────────────────────────────────────
+  var GLOCK_KEY = "ZtePanelGuidedLock"; // localStorage JSON { phase, pci, earfcn, prevMode, startedAt, resumes }
+  var GLOCK_MAX_RESUMES = 5;            // give up after this many reload-resumes
+  var GLOCK_MAX_AGE = 240000;           // ms; abandon a routine older than this
+  var GLOCK_STEP_WAIT = 20000;          // ms budget to wait for a mode/attach change
+  var GLOCK_STEP_POLL = 1500;           // ms between state polls while waiting
+
+  function glock_get() { try { return JSON.parse(localStorage.getItem(GLOCK_KEY) || "null"); } catch (e) { return null; } }
+  function glock_set(st) { try { localStorage.setItem(GLOCK_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ } }
+  function glock_clear() { try { localStorage.removeItem(GLOCK_KEY); } catch (e) { /* ignore */ } }
+
+  // Poll the router until pred(S.net) holds or the budget runs out. Returns true if it held.
+  async function glock_wait(pred, budget) {
+    var t0 = Date.now();
+    while (Date.now() - t0 < budget) {
+      try { await poll_once(true); } catch (e) { /* a hard drop is handled by the caller */ }
+      if (pred(S.net || {})) return true;
+      await new Promise(function (r) { setTimeout(r, GLOCK_STEP_POLL); });
+    }
+    return false;
+  }
+
+  // One ubus setter for the routine. Throws when the session is gone, so the caller can recover.
+  async function glock_call(desc, callObj) {
+    var r = await ubusRetry(callObj); // throws on a network/abort failure (a hard drop)
+    if (r && r.accessDenied) throw new Error("session lost at " + desc);
+    return !!(r && r.success);
+  }
+  function glock_set_mode(mode) {
+    return glock_call("mode " + mode, { service: "zte_nwinfo_api", method: "nwinfo_set_netselect", params: { net_select: mode } });
+  }
+
+  // Public entry point (main LTE Lock button and the scan's per-LTE-cell Lock buttons both call it).
+  window.zte_guided_lte_lock = async function (pci, earfcn) {
+    var existing = glock_get();
+    if (S.glock_running || (existing && Date.now() - existing.startedAt < GLOCK_MAX_AGE)) {
+      toast("A guided LTE lock is already in progress.", "warn"); return;
+    }
+    if (existing) glock_clear(); // a stale, abandoned routine — replace it
+    pci = String(pci).trim(); earfcn = String(earfcn).trim();
+    if (pci === "" || isNaN(pci) || earfcn === "" || isNaN(earfcn)) { toast("Guided lock: invalid PCI/EARFCN", "error"); return; }
+    if (+pci < 0 || +pci > 503) { toast("PCI must be between 0 and 503", "error"); return; }
+    var prev = S.net.net_select || "LTE_AND_5G";
+    if (prev === "Only_LTE") prev = "LTE_AND_5G"; // already on LTE-Only: restore to 5G NSA afterwards
+    if (!confirm(
+      "Guided LTE cell lock — PCI " + pci + ", EARFCN " + earfcn + "\n\n" +
+      "The panel will:\n  1. switch to LTE-Only\n  2. lock this cell\n  3. return to " + (NET_MODES[prev] || prev) + "\n\n" +
+      "⚠️ Your connection may drop for ~10–20 s while the mode changes. If the router logs you out, the panel logs back in and finishes on its own.\n" +
+      "⚠️ If this cell is not on your operator you will have no service until you unlock.\n\nContinue?"
+    )) return;
+    glock_set({ phase: "to_lte", pci: pci, earfcn: earfcn, prevMode: prev, startedAt: Date.now(), resumes: 0 });
+    await glock_run();
+  };
+
+  // The state machine. Runs the current phase, advances, persists; safe to re-enter to resume.
+  async function glock_run() {
+    var st = glock_get();
+    if (!st || S.glock_running) return;
+    if (Date.now() - st.startedAt > GLOCK_MAX_AGE || (st.resumes || 0) > GLOCK_MAX_RESUMES) {
+      toast("Guided lock: giving up — restoring " + (NET_MODES[st.prevMode] || st.prevMode) + "…", "warn", 10000);
+      try { await glock_set_mode(st.prevMode); } catch (e) { /* ignore */ }
+      glock_clear(); S.pause_poll = false; return;
+    }
+    S.glock_running = true;
+    S.pause_poll = true; // keep the main poll loop out of the routine's way
+    try {
+      if (st.phase === "to_lte") {
+        toast("Guided lock 1/4 — switching to LTE-Only…", "info", 6000);
+        await glock_set_mode("Only_LTE");
+        await glock_wait(function (d) { return d.net_select === "Only_LTE"; }, GLOCK_STEP_WAIT);
+        await glock_wait(function (d) { return d.network_type === "LTE"; }, 8000); // let it camp on LTE
+        st.phase = "locking"; glock_set(st);
+      }
+      if (st.phase === "locking") {
+        toast("Guided lock 2/4 — locking LTE cell " + st.pci + "," + st.earfcn + "…", "info", 6000);
+        await glock_call("cell lock", { service: "zte_nwinfo_api", method: "nwinfo_lock_lte_cell", params: { lock_lte_pci: String(st.pci), lock_lte_earfcn: String(st.earfcn) } });
+        st.phase = "settle"; glock_set(st);
+      }
+      if (st.phase === "settle") {
+        await new Promise(function (r) { setTimeout(r, 2500); });
+        st.phase = "restore"; glock_set(st);
+      }
+      if (st.phase === "restore") {
+        toast("Guided lock 3/4 — returning to " + (NET_MODES[st.prevMode] || st.prevMode) + "…", "info", 6000);
+        await glock_set_mode(st.prevMode);
+        await glock_wait(function (d) {
+          return d.net_select === st.prevMode && (d.network_type === "ENDC" || d.network_type === "SA" || d.network_type === "LTE");
+        }, GLOCK_STEP_WAIT);
+        st.phase = "verify"; glock_set(st);
+      }
+      if (st.phase === "verify") {
+        try { await poll_once(false); } catch (e) { /* ignore */ }
+        var locked = (S.net.lock_lte_cell || "") === st.pci + "," + st.earfcn;
+        var mode_ok = S.net.net_select === st.prevMode;
+        var nt = S.net.network_type || "?";
+        glock_clear();
+        if (locked && mode_ok)
+          toast("✅ Guided lock done — LTE " + st.pci + "," + st.earfcn + " locked · " + (NET_MODES[st.prevMode] || st.prevMode) + " (" + nt + ")", "ok", 12000);
+        else
+          toast("Guided lock finished — lock " + (locked ? "✓" : "?") + " · mode " + (mode_ok ? "✓" : "?") + " (" + nt + "). Check the panel; toggle mode or reboot if the lock is not active.", "warn", 14000);
+      }
+    } catch (e) {
+      var cur = glock_get();
+      if (cur) { cur.resumes = (cur.resumes || 0) + 1; glock_set(cur); }
+      var alive = false;
+      try { alive = await check_login(); } catch (_) { alive = false; }
+      S.glock_running = false;
+      if (!alive) {
+        toast("Guided lock — the router dropped the session. Re-logging in to finish…", "warn", 9000);
+        setTimeout(function () { location.reload(); }, 1200); // auto-login recovers; start_panel resumes the routine
+      } else {
+        toast("Guided lock paused: " + (e && e.message ? e.message : e) + " — retrying…", "warn", 8000);
+        setTimeout(glock_run, 2500);
+      }
+      return;
+    }
+    S.glock_running = false;
+    S.pause_poll = false;
+  }
+
+  // Called from start_panel: if a routine was interrupted by a session drop, finish it.
+  function glock_resume_if_pending() {
+    if (!glock_get()) return;
+    var st = glock_get();
+    toast("Resuming guided LTE lock (" + st.pci + "," + st.earfcn + ")…", "info", 7000);
+    glock_run();
+  }
 
   // ─────────────────────────────────────────────
   //  WIFI SETTINGS (ubus: uci get wireless / zwrt_wlan.set)
@@ -3124,6 +3363,8 @@
       S.session_lost = false;
       S.expired_warned = false;
       S.poll_tick = 0;
+      S.lost_checks = 0;
+      S.self_heal_tried = false;
       return;
     }
     S.lost_checks++;
@@ -3131,6 +3372,16 @@
       S.expired_warned = true;
       console.log("[ZTE] session ended " + Math.round((Date.now() - S.started_at) / 1000) + " s after the panel started");
       toast("Router session ended — log in again on the router page.", "warn");
+    }
+    // Self-heal: the router dropped the session while the page stayed open (not a deliberate
+    // logout). Reload once so the saved-password auto-login recovers, instead of waiting for a
+    // manual refresh. Guards (one attempt per drop, saved password, not a logout, no recent
+    // auto-login) keep it from looping; after a failed reload the login page's own flow takes over.
+    if (!S.self_heal_tried && S.lost_checks >= 3 && saved_hash() && !just_logged_out() &&
+        ms_since(sessionStorage, TRIED_KEY) > 90000) {
+      S.self_heal_tried = true;
+      toast("Session lost — reloading to log back in automatically…", "info", 6000);
+      setTimeout(function () { location.reload(); }, 1500);
     }
   }
 
@@ -3274,23 +3525,29 @@
       : '<span style="color:#78909C;" title="' + esc(nrTip) + '">Unlocked</span>');
     zset("zte_nr_lock_type", nsa_type());
 
+    // Summary on the folded "RF Tuning & Locks" bar: only what is locked (bands, then cell locks)
+    var sumBands = [];
+    if (lb && lb.length && !allLte) sumBands.push("B" + lb.join("+B"));
+    if (nrTxt) sumBands.push(nrTxt.replace(/ \+ /g, "+"));
+    var sumCells = [ll ? "LTE" : "", nl ? "5G" : ""].filter(Boolean);
+    var sumParts = [];
+    if (sumBands.length) sumParts.push('<span style="color:#E65100;">' + esc(sumBands.join(" · ")) + "</span>");
+    if (sumCells.length) sumParts.push('<span style="color:#D32F2F;">cell ' + sumCells.join("+") + "</span>");
+    var sumEl = zel("zte_rf_sum");
+    if (sumEl) {
+      sumEl.innerHTML = sumParts.length
+        ? "🔒 " + sumParts.join(' <span style="color:#90A4AE;">·</span> ')
+        : '<span style="color:#78909C;">Unlocked</span>';
+      sumEl.title = sumEl.textContent;
+    }
+
     // ── Signal cards ──
     zhtml("zte_lte_cards", lte.length
       ? lte.map(function (c, i) { return cell_card("lte", c, i, lte.length); }).join("")
-      : '<div style="color:#78909C;font-size:11px;">No LTE cells</div>');
+      : '<div style="color:#78909C;font-size:11px;margin-bottom:6px;">No LTE cells</div>');
     zhtml("zte_nr_cards", nr.length
       ? nr.map(function (c, i) { return cell_card("nr", c, i, nr.length); }).join("")
-      : '<div style="color:#78909C;font-size:11px;">No 5G cells</div>');
-
-    // ── Neighbour cells (only if the firmware exposes such a field) ──
-    var nkeys = Object.keys(d).filter(function (k) { return /ngbr|neighbo|nbr_cell/i.test(k) && d[k]; });
-    ztoggle("ngbr_cells", nkeys.length > 0);
-    if (nkeys.length) {
-      zhtml("ngbr_cell_info_content", nkeys.map(function (k) {
-        return '<div style="font-size:10px;color:#78909C;margin-top:4px;">' + esc(k) + "</div>" +
-          '<div style="font-size:11px;word-break:break-all;">' + esc(String(d[k])).replace(/;/g, "<br>") + "</div>";
-      }).join(""));
-    }
+      : '<div style="color:#78909C;font-size:11px;margin-bottom:6px;">No 5G cells</div>');
 
     update_traffic();
     update_device();
@@ -3376,7 +3633,7 @@
     var s = document.createElement("style");
     s.id = "zte_tm_style";
     s.textContent = [
-      "#zte_panel{position:fixed;top:12px;left:12px;z-index:2147483646;width:440px;max-height:94vh;",
+      "#zte_panel{position:fixed;top:12px;left:12px;z-index:2147483646;width:454px;max-height:94vh;",
       "background:#FFFFFF;color:#37474F;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.15);",
       'font-family:"Segoe UI",Verdana,sans-serif;font-size:12px;border:1px solid #B0BEC5;display:flex;flex-direction:column;}',
       "#zte_panel *,#zte_modal *{box-sizing:border-box;}",
@@ -3389,10 +3646,22 @@
       ".zte_icon_btn{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#FFFFFF;cursor:pointer;font-size:13px;",
       "padding:2px 7px;border-radius:5px;line-height:1;font-family:inherit;}",
       ".zte_icon_btn:hover{background:rgba(255,255,255,.3);}",
-      "#zte_body{padding:10px;background:#FAFAFA;overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#90A4AE #E3F2FD;}",
+      "#zte_body{padding:8px;background:#FAFAFA;overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#90A4AE #E3F2FD;}",
       "#zte_panel .zte_value,#zte_panel td,#zte_panel .zte_label,#zte_modal .zte_value{user-select:text;-webkit-user-select:text;}",
       ".zte_sec{background:#FFFFFF;border-radius:8px;padding:8px 10px;margin-bottom:8px;border:1px solid #E0E0E0;box-shadow:0 1px 3px rgba(0,0,0,.05);}",
       ".zte_sec_title{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#1976D2;margin-bottom:6px;font-weight:700;}",
+      ".zte_grp{background:#F1F7FE;border:1px solid #BBDEFB;border-radius:10px;overflow:hidden;margin-bottom:10px;}",
+      ".zte_grp_title{display:flex;align-items:center;gap:12px;position:relative;background:#E3F2FD;border-bottom:1px solid #BBDEFB;color:#0D47A1;" +
+        "font-size:11px;font-weight:800;letter-spacing:1.3px;text-transform:uppercase;padding:8px 30px 8px 11px;}",
+      ".zte_grp_name{flex:none;}",
+      ".zte_grp_body{padding:8px 8px 0;}",
+      ".zte_grp_fold > .zte_grp_title{cursor:pointer;}",
+      ".zte_grp_fold > .zte_grp_title::after{content:'\\25BE';position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#1976D2;font-size:11px;}",
+      ".zte_grp_closed > .zte_grp_title::after{content:'\\25B8';}",
+      ".zte_grp_closed > .zte_grp_title{border-bottom:none;}",
+      ".zte_grp_closed > .zte_grp_body{display:none;}",
+      ".zte_grp_sum{flex:1;min-width:0;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px;font-weight:700;letter-spacing:0;text-transform:none;}",
+      ".zte_grp:not(.zte_grp_closed) .zte_grp_sum{display:none;}",
       ".zte_sec.zte_collapsible > :first-child{cursor:pointer;position:relative;padding-right:16px;}",
       ".zte_sec.zte_collapsible > :first-child::after{content:'\\25BE';position:absolute;right:0;top:50%;transform:translateY(-50%);color:#90A4AE;font-size:10px;font-weight:700;}",
       ".zte_sec.zte_collapsed > :first-child::after{content:'\\25B8';}",
@@ -3446,6 +3715,12 @@
   function btn(label, fn, cls) {
     return '<button class="zte_btn' + (cls ? " " + cls : "") + '" onclick="' + fn + '">' + label + "</button>";
   }
+  // a group of sections: a frame whose bar is the header and whose sections are cards inside it
+  function grp_open(name, foldable, extra) {
+    return '<div class="zte_grp' + (foldable ? " zte_grp_fold" : "") + '"><div class="zte_grp_title"><span class="zte_grp_name">' + name + "</span>" +
+      (extra || "") + '</div><div class="zte_grp_body">';
+  }
+  var GRP_CLOSE = "</div></div>";
   function chip(label, fn) {
     return '<span class="zte_chip" onclick="' + fn + '">' + label + "</span>";
   }
@@ -3469,8 +3744,10 @@
       '<button class="zte_icon_btn" id="zte_min_btn" title="Minimize">−</button>' +
       "</div></div>" +
       '<div id="zte_body">' +
+      // ════ DASHBOARD (never folds) ════
+      grp_open("Dashboard", false) +
       // ── NETWORK ──
-      '<div class="zte_sec"><div class="zte_sec_title">Network</div>' +
+      '<div class="zte_sec zte_fixed"><div class="zte_sec_title">Network</div>' +
       vrow("Provider", "network_provider_fullname") +
       vrow("Type", "network_type") +
       vrow("Bands", "__bandinfo") +
@@ -3487,96 +3764,11 @@
       vrow("Session", "zte_session_info") +
       vrow("Cell Lock", "zte_lock_status", "", "zte_lock_row", true) +
       "</div>" +
-      // ── LTE SIGNAL ──
-      '<div class="zte_sec"><div class="zte_sec_title">LTE Signal</div><div id="zte_lte_cards"></div></div>' +
-      // ── 5G SIGNAL ──
-      '<div class="zte_sec"><div class="zte_sec_title">5G Signal (NR)</div><div id="zte_nr_cards"></div></div>' +
-      // ── ODU ANTENNA (shown only if the router has the setting) ──
-      '<div class="zte_sec" id="zte_ant_sec" style="display:none;"><div class="zte_sec_title">ODU Antenna Selection</div>' +
-      '<div class="zte_row"><span class="zte_label">Method</span>' +
-      '<select id="zte_ant_sel" class="zte_select" onchange="window.zte_set_antenna(this.value)">' +
-      ANT_MODES.map(function (m) { return '<option value="' + esc(m.v) + '">' + esc(ant_text(m)) + "</option>"; }).join("") +
-      "</select></div>" +
-      '<div id="zte_ant_src" style="font-size:9px;color:#B0BEC5;text-align:right;margin-top:-2px;">—</div>' +
-      vrow("In use", "zte_ant_cur") +
-      vrow("Auto-selection switch", "zte_ant_sw") +
-      '<div style="font-size:10px;color:#78909C;margin-top:5px;">ZTE: for debugging; in normal use keep <b>Automatic switching</b>. ' +
-      "A change may ask for the router password (developer session) and lasts until reboot.</div>" +
-      '<div class="zte_btn_grid">' + btn("↻ Refresh antenna", "window.zte_antenna_refresh()", "full") + "</div>" +
+      // ── SIGNAL (LTE + 5G carriers in one card; always open) ──
+      '<div class="zte_sec zte_fixed"><div class="zte_sec_title">Signal</div>' +
+      '<div id="zte_lte_cards"></div><div id="zte_nr_cards"></div>' +
+      '<div class="zte_btn_grid" style="margin-top:6px;">' + btn("📋 Copy Signal", "window.zte_copy_signal()", "ok full") + "</div>" +
       "</div>" +
-      // ── NEIGHBOUR CELLS (shown only if exposed by firmware) ──
-      '<div class="zte_sec" id="ngbr_cells" style="display:none"><div class="zte_sec_title">Neighbor Cells (raw)</div>' +
-      '<div id="ngbr_cell_info_content"></div></div>' +
-      // ── NEIGHBOUR SCAN & FORCE CONNECT ──
-      '<div class="zte_sec"><div class="zte_sec_title">Neighbor Scan & Force Connect</div>' +
-      '<div style="font-size:10px;color:#78909C;margin-bottom:6px;">Uses the router\'s built-in scan (~30 s). ' +
-      'Mobile data is off while it scans; the panel turns it back on. "Lock" applies a cell lock on that PCI + EARFCN.</div>' +
-      '<div class="zte_btn_grid">' +
-      btn("🔍 Start Scan", "window.zte_nbr_scan()", "ok") +
-      btn("📋 Copy raw scan data", "window.zte_copy_nbr()") +
-      "</div>" +
-      '<div id="zte_scan_panel" style="display:none;margin-top:8px;">' +
-      '<div id="zte_scan_status" style="color:#1976D2;font-size:11px;margin-bottom:6px;">—</div>' +
-      '<div style="overflow-x:auto;"><table><thead><tr>' +
-      "<th>Type</th><th>Band</th><th>RSRP</th><th>RSRQ</th><th>SINR</th><th>PCI</th><th>(E)ARFCN</th><th></th>" +
-      '</tr></thead><tbody id="zte_scan_tbody"></tbody></table></div>' +
-      "</div></div>" +
-      // ── CONNECTION ──
-      '<div class="zte_sec"><div class="zte_sec_title">Connection</div><div class="zte_btn_grid">' +
-      btn("🔀 Reconnect data (off/on)", "window.zte_wan_reconnect()", "warn") +
-      btn("🌐 DNS settings", "window.zte_dns()") +
-      btn("🌉 Bridge mode ON", "window.zte_bridge_mode(true)", "warn") +
-      btn("📶 Router mode (bridge OFF)", "window.zte_bridge_mode(false)") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Operation mode: <b id="zte_opmode">—</b></div>' +
-      btn("🧩 ARP Proxy ON", "window.zte_arp_proxy(true)") +
-      btn("🧩 ARP Proxy OFF", "window.zte_arp_proxy(false)", "danger") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">ARP proxy: <b id="zte_arp_state">—</b> <span style="color:#B0BEC5;">(default: off)</span></div>' +
-      btn("🔄 Reboot Router", "window.zte_reboot()", "danger full") +
-      "</div></div>" +
-      // ── NETWORK MODE ──
-      '<div class="zte_sec"><div class="zte_sec_title">Network Mode</div><div class="zte_btn_grid">' +
-      Object.keys(NET_MODES).map(function (m) {
-        return '<button class="zte_btn" id="zte_mode_' + m + "\" onclick=\"window.zte_set_net_mode('" + m + "')\">" + NET_MODES[m] + "</button>";
-      }).join("") +
-      btn("✏ Custom...", "window.zte_set_net_mode(null)", "full") +
-      "</div></div>" +
-      // ── LTE BANDS ──
-      '<div class="zte_sec">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
-      '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">LTE Bands</span>' +
-      '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_lte_band_lock_status" style="font-weight:700">—</span></span></div>' +
-      '<div id="zte_lte_chips">' + band_chips("lte") + "</div>" +
-      '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_lte_band_unlock()">🔓 Remove LTE Band Lock</button>' +
-      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_lte_supported">reading…</span></div>' +
-      "</div>" +
-      // ── 5G BANDS ──
-      '<div class="zte_sec">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
-      '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">5G Bands (NR)</span>' +
-      '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_nr_band_lock_status" style="font-weight:700">—</span></span></div>' +
-      '<div id="zte_nr_chips">' + band_chips("nr") + "</div>" +
-      '<div style="font-size:10px;color:#78909C;margin-top:5px;">NSA lock type in use: <b id="zte_nr_lock_type">—</b> (found automatically)</div>' +
-      '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_nr_band_unlock()">🔓 Remove NR Band Lock</button>' +
-      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_nr_supported">reading…</span></div>' +
-      '<div class="zte_btn_grid">' +
-      btn("🧪 Probe 5G NSA lock", "window.zte_probe_nr_nsa()", "warn") +
-      btn("🔎 Find band-lock API", "window.zte_find_lock_api()") +
-      "</div>" +
-      "</div>" +
-      // ── GLOBAL RESET ──
-      '<div class="zte_sec"><div class="zte_sec_title">Band Lock — Global Reset</div>' +
-      '<button class="zte_btn danger" style="width:100%;" onclick="window.zte_unlock_all_bands()">🔓 Remove ALL Band Locks (LTE + NR)</button></div>' +
-      // ── CELL LOCK ──
-      '<div class="zte_sec"><div class="zte_sec_title">Cell Lock</div>' +
-      '<div style="font-size:10px;color:#78909C;margin-bottom:4px;" id="zte_cell_lock_state">—</div>' +
-      '<div style="font-size:10px;color:#78909C;margin-bottom:6px;">Prompts are prefilled with the current cell. After locking/unlocking, toggle network mode or reboot to apply.</div>' +
-      '<div class="zte_btn_grid">' +
-      btn("🔒 LTE Lock", "window.zte_lte_cell_lock(false)") +
-      btn("🔓 LTE Unlock", "window.zte_lte_cell_lock(true)", "danger") +
-      btn("🔒 5G Lock", "window.zte_nr_cell_lock(false)") +
-      btn("🔓 5G Unlock", "window.zte_nr_cell_lock(true)", "danger") +
-      btn("♻ Reset ALL band & cell locks (firmware)", "window.zte_reset_band_cell()", "danger full") +
-      "</div></div>" +
       // ── TRAFFIC ──
       '<div class="zte_sec"><div class="zte_sec_title">Traffic Statistics</div>' +
       vrow("⬇ Download", "zte_rx_speed") +
@@ -3620,39 +3812,94 @@
       '<div class="zte_btn_grid">' +
       '<button class="zte_btn full" id="zte_gnss_refresh_btn" onclick="window.zte_gps_refresh()">🛰 Refresh position</button>' +
       "</div></div>" +
-      // ── WIFI ──
-      '<div class="zte_sec" id="zte_wifi_sec"><div class="zte_sec_title">WiFi</div><div class="zte_btn_grid">' +
-      btn("ℹ️ WiFi Info", "window.zte_wifi_info()", "full") +
-      btn("📡 Set TX Power", "window.zte_wifi_txpower()") +
-      btn("🌍 Set Country", "window.zte_wifi_country()", "warn") +
+      GRP_CLOSE +
+      // ════ RF TUNING & LOCKS ════
+      grp_open("RF Tuning &amp; Locks", true, '<span class="zte_grp_sum" id="zte_rf_sum"></span>') +
+      // ── NETWORK MODE ──
+      '<div class="zte_sec"><div class="zte_sec_title">Network Mode</div><div class="zte_btn_grid">' +
+      Object.keys(NET_MODES).map(function (m) {
+        return '<button class="zte_btn" id="zte_mode_' + m + "\" onclick=\"window.zte_set_net_mode('" + m + "')\">" + NET_MODES[m] + "</button>";
+      }).join("") +
+      btn("✏ Custom...", "window.zte_set_net_mode(null)", "full") +
       "</div></div>" +
-      // ── ADVANCED ──
-      '<div class="zte_sec"><div class="zte_sec_title">Advanced</div><div class="zte_btn_grid">' +
-      btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
-      btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
-      btn("🛠 Developer Login", "window.zte_developer_login()") +
-      btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
-      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
-      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
-      '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
-      btn("🔍 Search recorded calls…", "window.zte_rec_search()", "full") +
-      '<div id="zte_rec_count" style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">0 calls recorded</div>' +
-      btn("🔎 Find API by keyword…", "window.zte_find_api()") +
-      btn("🧪 Custom ubus call…", "window.zte_custom_ubus()", "warn") +
-      "</div></div>" +
-      // ── HIDDEN SETTINGS (shown only if the router supports them) ──
-      '<div class="zte_sec" id="zte_sys_sec" style="display:none;"><div class="zte_sec_title">Hidden Settings</div>' +
-      '<div class="zte_row" id="zte_sys_timeout_row" style="display:none;"><span class="zte_label">Session timeout</span>' +
-      '<span class="zte_value" id="zte_sys_timeout">\u2014</span></div>' +
-      '<div class="zte_btn_grid" id="zte_sys_timeout_btns" style="margin-bottom:6px;">' +
-      btn("\u270f Change session timeout\u2026", "window.zte_set_login_timeout()", "full") + "</div>" +
-      '<div class="zte_row" id="zte_sys_thermal_row" style="display:none;"><span class="zte_label" id="zte_thermal_label">Temperature control</span>' +
-      '<span class="zte_value" id="zte_sys_thermal">\u2014</span></div>' +
+      // ── ODU ANTENNA (shown only if the router has the setting) ──
+      '<div class="zte_sec" id="zte_ant_sec" style="display:none;"><div class="zte_sec_title">ODU Antenna Selection</div>' +
+      '<div class="zte_row"><span class="zte_label">Method</span>' +
+      '<select id="zte_ant_sel" class="zte_select" onchange="window.zte_set_antenna(this.value)">' +
+      ANT_MODES.map(function (m) { return '<option value="' + esc(m.v) + '">' + esc(ant_text(m)) + "</option>"; }).join("") +
+      "</select></div>" +
+      '<div id="zte_ant_src" style="font-size:9px;color:#B0BEC5;text-align:right;margin-top:-2px;">—</div>' +
+      vrow("In use", "zte_ant_cur") +
+      vrow("Auto-selection switch", "zte_ant_sw") +
+      '<div style="font-size:10px;color:#78909C;margin-top:5px;">ZTE: for debugging; in normal use keep <b>Automatic switching</b>. ' +
+      "A change may ask for the router password (developer session) and lasts until reboot.</div>" +
+      '<div class="zte_btn_grid">' + btn("↻ Refresh antenna", "window.zte_antenna_refresh()", "full") + "</div>" +
+      "</div>" +
+      // ── LTE BANDS ──
+      '<div class="zte_sec">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+      '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">LTE Bands</span>' +
+      '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_lte_band_lock_status" style="font-weight:700">—</span></span></div>' +
+      '<div id="zte_lte_chips">' + band_chips("lte") + "</div>" +
+      '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_lte_band_unlock()">🔓 Remove LTE Band Lock</button>' +
+      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_lte_supported">reading…</span></div>' +
+      "</div>" +
+      // ── 5G BANDS ──
+      '<div class="zte_sec">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+      '<span class="zte_sec_title" style="margin-bottom:0;white-space:nowrap;flex-shrink:0;">5G Bands (NR)</span>' +
+      '<span style="font-size:10px;text-align:right;min-width:0;margin-left:10px;overflow-wrap:anywhere;">Lock: <span id="zte_nr_band_lock_status" style="font-weight:700">—</span></span></div>' +
+      '<div id="zte_nr_chips">' + band_chips("nr") + "</div>" +
+      '<div style="font-size:10px;color:#78909C;margin-top:5px;">NSA lock type in use: <b id="zte_nr_lock_type">—</b> (found automatically)</div>' +
+      '<button class="zte_btn danger" style="width:100%;margin-top:7px;" onclick="window.zte_nr_band_unlock()">🔓 Remove NR Band Lock</button>' +
+      '<div style="font-size:10px;color:#78909C;margin-top:6px;overflow-wrap:anywhere;">Supported bands: <span id="zte_nr_supported">reading…</span></div>' +
       '<div class="zte_btn_grid">' +
-      '<button class="zte_btn ok" id="zte_thermal_on_btn" onclick="window.zte_thermal(true)">\ud83c\udf21 On</button>' +
-      '<button class="zte_btn danger" id="zte_thermal_off_btn" onclick="window.zte_thermal(false)">\ud83c\udf21 Off</button>' +
-      '<div id="zte_thermal_note" style="grid-column:1/-1;font-size:10px;color:#78909C;">Keep it on.</div>' +
+      btn("🧪 Probe 5G NSA lock", "window.zte_probe_nr_nsa()", "warn") +
+      btn("🔎 Find band-lock API", "window.zte_find_lock_api()") +
+      "</div>" +
+      "</div>" +
+      // ── GLOBAL RESET ──
+      '<div class="zte_sec"><div class="zte_sec_title">Band Lock — Global Reset</div>' +
+      '<button class="zte_btn danger" style="width:100%;" onclick="window.zte_unlock_all_bands()">🔓 Remove ALL Band Locks (LTE + NR)</button></div>' +
+      // ── NEIGHBOUR SCAN & FORCE CONNECT ──
+      '<div class="zte_sec"><div class="zte_sec_title">Neighbor Scan & Force Connect</div>' +
+      '<div style="font-size:10px;color:#78909C;margin-bottom:6px;">Uses the router\'s built-in scan (~30 s). ' +
+      'Mobile data is off while it scans; the panel turns it back on. "Lock" applies a cell lock on that PCI + EARFCN.</div>' +
+      '<div class="zte_btn_grid">' +
+      btn("🔍 Start Scan", "window.zte_nbr_scan()", "ok") +
+      btn("📋 Copy raw scan data", "window.zte_copy_nbr()") +
+      "</div>" +
+      '<div id="zte_scan_panel" style="display:none;margin-top:8px;">' +
+      '<div id="zte_scan_status" style="color:#1976D2;font-size:11px;margin-bottom:6px;">—</div>' +
+      '<div style="overflow-x:auto;"><table><thead><tr>' +
+      "<th>Type</th><th>Band</th><th>RSRP</th><th>RSRQ</th><th>SINR</th><th>PCI</th><th>(E)ARFCN</th><th></th>" +
+      '</tr></thead><tbody id="zte_scan_tbody"></tbody></table></div>' +
+      "</div></div>" +
+      // ── CELL LOCK ──
+      '<div class="zte_sec"><div class="zte_sec_title">Cell Lock</div>' +
+      '<div style="font-size:10px;color:#78909C;margin-bottom:4px;" id="zte_cell_lock_state">—</div>' +
+      '<div style="font-size:10px;color:#78909C;margin-bottom:6px;">Prompts are prefilled with the current cell. After locking/unlocking, toggle network mode or reboot to apply.</div>' +
+      '<div class="zte_btn_grid">' +
+      btn("🔒 LTE Lock", "window.zte_lte_cell_lock(false)") +
+      btn("🔓 LTE Unlock", "window.zte_lte_cell_lock(true)", "danger") +
+      btn("🔒 5G Lock", "window.zte_nr_cell_lock(false)") +
+      btn("🔓 5G Unlock", "window.zte_nr_cell_lock(true)", "danger") +
+      btn("♻ Reset ALL band & cell locks (firmware)", "window.zte_reset_band_cell()", "danger full") +
+      "</div></div>" +
+      GRP_CLOSE +
+      // ════ ROUTER SETTINGS ════
+      grp_open("Router Settings", true) +
+      // ── CONNECTION ──
+      '<div class="zte_sec"><div class="zte_sec_title">Connection</div><div class="zte_btn_grid">' +
+      btn("🔀 Reconnect data (off/on)", "window.zte_wan_reconnect()", "warn") +
+      btn("🌐 DNS settings", "window.zte_dns()") +
+      btn("🌉 Bridge mode ON", "window.zte_bridge_mode(true)", "warn") +
+      btn("📶 Router mode (bridge OFF)", "window.zte_bridge_mode(false)") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Operation mode: <b id="zte_opmode">—</b></div>' +
+      btn("🧩 ARP Proxy ON", "window.zte_arp_proxy(true)") +
+      btn("🧩 ARP Proxy OFF", "window.zte_arp_proxy(false)", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">ARP proxy: <b id="zte_arp_state">—</b> <span style="color:#B0BEC5;">(default: off)</span></div>' +
+      btn("🔄 Reboot Router", "window.zte_reboot()", "danger full") +
       "</div></div>" +
       // ── QoS + TR-069 status (shown only where the router answers) ──
       '<div class="zte_sec" id="zte_dev_sec" style="display:none;"><div class="zte_sec_title">Remote Management &amp; QoS</div>' +
@@ -3680,13 +3927,61 @@
       "</div>" +
       '<div style="font-size:10px;color:#78909C;margin-top:6px;">Remote management (ACS). Works even where the router hides the TR-069 page. The ACS password is handled by the router\u2019s own code \u2014 the panel never reads it. Periodic inform only matters while CWMP is on.</div></div>' +
       "</div>" +
+      // ── WIFI ──
+      '<div class="zte_sec" id="zte_wifi_sec"><div class="zte_sec_title">WiFi</div><div class="zte_btn_grid">' +
+      btn("ℹ️ WiFi Info", "window.zte_wifi_info()", "full") +
+      btn("📡 Set TX Power", "window.zte_wifi_txpower()") +
+      btn("🌍 Set Country", "window.zte_wifi_country()", "warn") +
+      "</div></div>" +
+      GRP_CLOSE +
+      // ════ ADVANCED TOOLS ════
+      grp_open("Advanced Tools", true) +
+      // ── LOGIN ──
+      '<div class="zte_sec"><div class="zte_sec_title">Login</div><div class="zte_btn_grid">' +
+      btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
+      btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
+      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
+      btn("🛠 Developer Login", "window.zte_developer_login()", "full") +
+      "</div>" +
+      // session timeout: shown only if the router supports it
+      '<div class="zte_row" id="zte_sys_timeout_row" style="display:none;margin-top:6px;"><span class="zte_label">Session timeout</span>' +
+      '<span class="zte_value" id="zte_sys_timeout">\u2014</span></div>' +
+      '<div class="zte_btn_grid" id="zte_sys_timeout_btns" style="display:none;">' +
+      btn("\u270f Change session timeout\u2026", "window.zte_set_login_timeout()", "full") + "</div>" +
+      "</div>" +
+      // ── TEMPERATURE CONTROL (shown only if the router supports it) ──
+      '<div class="zte_sec" id="zte_thermal_sec" style="display:none;"><div class="zte_sec_title">Temperature Control</div>' +
+      '<div class="zte_row" id="zte_sys_thermal_row"><span class="zte_label" id="zte_thermal_label">Temperature control</span>' +
+      '<span class="zte_value" id="zte_sys_thermal">\u2014</span></div>' +
+      '<div class="zte_btn_grid">' +
+      '<button class="zte_btn ok" id="zte_thermal_on_btn" onclick="window.zte_thermal(true)">\ud83c\udf21 On</button>' +
+      '<button class="zte_btn danger" id="zte_thermal_off_btn" onclick="window.zte_thermal(false)">\ud83c\udf21 Off</button>' +
+      '<div id="zte_thermal_note" style="grid-column:1/-1;font-size:10px;color:#78909C;">Keep it on.</div>' +
+      "</div></div>" +
+      // ── HIDDEN MENUS & PAGES ──
+      '<div class="zte_sec"><div class="zte_sec_title">Hidden Menus &amp; Pages</div><div class="zte_btn_grid">' +
+      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
+      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
+      "</div></div>" +
+      // ── DEBUG (Full edition only) ──
+      '<div class="zte_sec"><div class="zte_sec_title">Debug</div><div class="zte_btn_grid">' +
+      '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
+      btn("🔍 Search recorded calls…", "window.zte_rec_search()", "full") +
+      '<div id="zte_rec_count" style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">0 calls recorded</div>' +
+      btn("🔎 Find API by keyword…", "window.zte_find_api()") +
+      btn("🧪 Custom ubus call…", "window.zte_custom_ubus()", "warn") +
+      "</div></div>" +
+      GRP_CLOSE +
       // ── TIP ──
       (CFG.bmac
         ? '<div class="zte_sec" style="text-align:center;background:#FFF8E1;border-color:#FFE082;">' +
-          '<div style="font-size:11px;color:#78909C;margin-bottom:8px;">This panel builds on the work of Cerix and Thomas Pöchtrager.<br>If it helps you, consider a small tip to them ☕</div>' +
-          '<a href="https://buymeacoffee.com/cerix" target="_blank" rel="noopener noreferrer" ' +
-          'style="display:inline-block;background:#FFDD00;color:#000;font-weight:700;font-size:13px;padding:9px 22px;' +
-          'border-radius:8px;text-decoration:none;border:2px solid #F0C800;">☕ Buy Me a Coffee — Cerix</a>' +
+          '<div style="font-size:11px;color:#546E7A;margin-bottom:8px;">If this fork saves you time, a small tip is appreciated 🙂<br>It builds on the work of Cerix and Thomas Pöchtrager — tips to them too.</div>' +
+          '<div style="margin-bottom:6px;"><a href="https://buymeacoffee.com/papatsonis" target="_blank" rel="noopener noreferrer" ' +
+          'style="display:inline-block;width:310px;box-sizing:border-box;white-space:nowrap;background:#FFDD00;color:#000;font-weight:700;font-size:12px;padding:6px 10px;' +
+          'border-radius:8px;text-decoration:none;border:2px solid #F0C800;">☕ Buy Me a Coffee — papatsonis (this fork)</a></div>' +
+          '<div><a href="https://buymeacoffee.com/cerix" target="_blank" rel="noopener noreferrer" ' +
+          'style="display:inline-block;width:310px;box-sizing:border-box;white-space:nowrap;background:#FFDD00;color:#000;font-weight:700;font-size:12px;padding:6px 10px;' +
+          'border-radius:8px;text-decoration:none;border:2px solid #F0C800;">☕ Buy Me a Coffee — Cerix</a></div>' +
           '<div style="font-size:10px;color:#90A4AE;margin-top:8px;">ZTE-Script-NG (ubus API) by Thomas Pöchtrager — PayPal tips: t.poechtrager@gmail.com</div>' +
           "</div>"
         : "") +
@@ -3702,30 +3997,47 @@
   // ─────────────────────────────────────────────
   //  COLLAPSIBLE SECTIONS (click a title to fold it; state saved per router)
   // ─────────────────────────────────────────────
-  // Open by default; every other section starts folded. Saved choices override these.
-  var COLLAPSE_OPEN = ["Network", "LTE Signal", "5G Signal (NR)", "Connection", "Network Mode", "Traffic Statistics"];
-  function collapse_key() { return "ZtePanelCollapse:" + location.hostname; }
+  // Default view: only "Network" and "Signal" are open (they carry zte_fixed and never fold). Every other
+  // section starts folded and every foldable group starts closed. Saved choices override these.
+  var COLLAPSE_OPEN = [];
+  // Groups closed by default (the Dashboard group cannot fold at all)
+  var GROUPS_CLOSED = ["RF Tuning & Locks", "Router Settings", "Advanced Tools"];
+  // "2": the grouped layout starts from its own defaults; fold choices saved by 1.33–1.35 are not carried over
+  function collapse_key() { return "ZtePanelCollapse2:" + location.hostname; }
   function load_collapse() { try { return JSON.parse(localStorage.getItem(collapse_key()) || "{}") || {}; } catch (e) { return {}; } }
   function save_collapse(m) { try { localStorage.setItem(collapse_key(), JSON.stringify(m)); } catch (e) { /* ignore */ } }
   function sec_title_text(sec) { var t = sec.querySelector(".zte_sec_title"); return t ? t.textContent.trim() : ""; }
+  function grp_name_text(grp) { var t = grp.querySelector(".zte_grp_name"); return t ? t.textContent.trim() : ""; }
 
   function setup_collapsers(panel) {
     var saved = load_collapse();
+    var has = function (k) { return Object.prototype.hasOwnProperty.call(saved, k); };
     panel.querySelectorAll(".zte_sec").forEach(function (sec) {
       var t = sec.querySelector(".zte_sec_title");
       if (!t) return;                                              // e.g. the tip box has no title
+      if (sec.classList.contains("zte_fixed")) return;             // Network, Signal: always open
       if (!sec.firstElementChild || !sec.firstElementChild.contains(t)) return; // title must live in the header
       sec.classList.add("zte_collapsible");
       var key = t.textContent.trim();
-      var collapsed = Object.prototype.hasOwnProperty.call(saved, key)
-        ? !!saved[key]
-        : COLLAPSE_OPEN.indexOf(key) === -1;
-      sec.classList.toggle("zte_collapsed", collapsed);
+      sec.classList.toggle("zte_collapsed", has(key) ? !!saved[key] : COLLAPSE_OPEN.indexOf(key) === -1);
+    });
+    panel.querySelectorAll(".zte_grp.zte_grp_fold").forEach(function (grp) {
+      var key = "grp:" + grp_name_text(grp);
+      grp.classList.toggle("zte_grp_closed", has(key) ? !!saved[key] : GROUPS_CLOSED.indexOf(grp_name_text(grp)) > -1);
     });
     panel.addEventListener("click", function (e) {
+      if (e.target.closest("button,select,a,input,textarea")) return;                           // let header controls work
+      var bar = e.target.closest(".zte_grp_fold > .zte_grp_title");
+      if (bar) {                                                                                // fold / unfold a whole group
+        var grp = bar.parentElement;
+        grp.classList.toggle("zte_grp_closed");
+        var mg = load_collapse();
+        mg["grp:" + grp_name_text(grp)] = grp.classList.contains("zte_grp_closed");
+        save_collapse(mg);
+        return;
+      }
       var sec = e.target.closest(".zte_sec.zte_collapsible");
       if (!sec || !sec.firstElementChild || !sec.firstElementChild.contains(e.target)) return; // header clicks only
-      if (e.target.closest("button,select,a,input,textarea")) return;                           // let header controls work
       sec.classList.toggle("zte_collapsed");
       var m = load_collapse();
       m[sec_title_text(sec)] = sec.classList.contains("zte_collapsed");
@@ -3935,17 +4247,16 @@
     S.init_done = true;
     S.started_at = Date.now();
     try { sessionStorage.removeItem(TRIED_KEY); } catch (e) { /* ignore */ } // logged in: an automatic login, if any, worked
+    try { localStorage.removeItem(USER_LOGOUT_KEY); } catch (e) { /* ignore */ } // logged in again: any earlier Logout click is spent
     stamp(sessionStorage, SEEN_KEY);
     inject_html();
     update_login_state();
-    // Leaving the page with the session token already removed = the Logout button was used
-    window.addEventListener("beforeunload", function () {
-      var ct = null;
-      try { ct = sessionStorage.getItem("ct"); } catch (e) { /* ignore */ }
-      if (!ct) stamp(localStorage, LOGOUT_KEY);
-    });
+    // Remember a deliberate Logout click, so the saved password is used only to recover from a
+    // logout the router forced — never to undo a logout the user asked for.
+    watch_logout_click();
     poll_loop();
     try { localStorage.removeItem("ZtePanelGpsSource"); } catch (e) {} // left over from older versions
+    try { localStorage.removeItem("ZtePanelLogoutAt"); } catch (e) {}  // left over from older versions (see USER_LOGOUT_KEY)
     setTimeout(read_sys_settings, 5000); // session timeout + temperature control, shown only if supported
     setTimeout(check_wifi, 3500); // hides the WiFi section on routers without WiFi
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
@@ -3955,6 +4266,8 @@
     setTimeout(load_qos_cap, 4000); // QoS support (once)
     setTimeout(load_tr069_cap, 4500); // TR-069 state (once)
     start_hidden_menus();
+    setTimeout(glock_resume_if_pending, 6500); // finish a guided LTE lock that a session drop interrupted
+    setTimeout(reconnect_resume_if_pending, 4500); // finish a mobile-data reconnect a reload interrupted
     toast("ZTE Panel NG v" + CFG.version + " active", "ok");
     console.log("[ZTE] Panel NG started, polling every", CFG.pollInterval, "ms");
   }

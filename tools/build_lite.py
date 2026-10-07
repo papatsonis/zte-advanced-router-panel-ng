@@ -144,16 +144,6 @@ b = banner_before("  //  MISC ACTIONS")
 assert "window.zte_custom_ubus" in s[a:b]
 s = s[:a] + s[b:]
 
-# raw "neighbor cells" field viewer (panel section + its update code)
-cut("    // ── Neighbour cells (only if the firmware exposes such a field) ──\n", "    update_traffic();\n")
-rep(
-    '''      // ── NEIGHBOUR CELLS (shown only if exposed by firmware) ──
-      '<div class="zte_sec" id="ngbr_cells" style="display:none"><div class="zte_sec_title">Neighbor Cells (raw)</div>' +
-      '<div id="ngbr_cell_info_content"></div></div>' +
-''',
-    "",
-)
-
 # ── Call recorder ──────────────────────────────────────────────────────
 cut_section("  //  API RECORDER", "  //  INIT")
 
@@ -185,35 +175,8 @@ rep(
       btn("📡 APN", "window.zte_apn_info()") +
 ''',
 )
-rep(
-    '''      // ── ADVANCED ──
-      '<div class="zte_sec"><div class="zte_sec_title">Advanced</div><div class="zte_btn_grid">' +
-      btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
-      btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
-      btn("🛠 Developer Login", "window.zte_developer_login()") +
-      btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
-      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
-      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
-      '<button class="zte_btn ok full" id="zte_rec_btn" onclick="window.zte_rec_toggle()">📼 Record router UI calls</button>' +
-      btn("🔍 Search recorded calls…", "window.zte_rec_search()", "full") +
-      '<div id="zte_rec_count" style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">0 calls recorded</div>' +
-      btn("🔎 Find API by keyword…", "window.zte_find_api()") +
-      btn("🧪 Custom ubus call…", "window.zte_custom_ubus()", "warn") +
-      "</div></div>" +
-''',
-    '''      // ── LOGIN & TOOLS ──
-      '<div class="zte_sec"><div class="zte_sec_title">Login &amp; Tools</div><div class="zte_btn_grid">' +
-      btn("🔑 Auto Login", "window.zte_enable_auto_login()") +
-      btn("🗑 Forget Password", "window.zte_forget_password()", "danger") +
-      '<div style="grid-column:1/-1;font-size:10px;color:#78909C;text-align:center;">Auto login: <b id="zte_autologin_state">—</b></div>' +
-      btn("🛠 Developer Login", "window.zte_developer_login()") +
-      btn("📋 Copy Signal", "window.zte_copy_signal()", "ok") +
-      '<button class="zte_btn" id="zte_hidden_btn" onclick="window.zte_hidden_toggle()">👁 Hidden Menus: OFF</button>' +
-      btn("📄 Hidden pages…", "window.zte_hidden_pages()") +
-      "</div></div>" +
-''',
-)
+# the Debug section (call recorder, API finder, custom calls) is Full only
+cut("      // ── DEBUG (Full edition only) ──\n", "      GRP_CLOSE +\n      // ── TIP ──")
 rep("""'<div id="zte_footer">ZTE Panel NG v' +""", """'<div id="zte_footer">ZTE Panel NG Lite v' +""")
 
 # network-mode prompt is no longer reachable (no "Custom…" button)
