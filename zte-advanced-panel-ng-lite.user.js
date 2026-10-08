@@ -3425,7 +3425,7 @@
       "background:#FFFFFF;color:#37474F;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.15);",
       'font-family:"Segoe UI",Verdana,sans-serif;font-size:12px;border:1px solid #B0BEC5;display:flex;flex-direction:column;}',
       "#zte_panel *,#zte_modal *{box-sizing:border-box;}",
-      "@media (max-width:480px){#zte_panel{left:8px !important;right:8px !important;width:auto !important;max-width:none !important;max-height:90vh !important;}#zte_hdr h2{font-size:12px;}}",
+      "@media (max-width:480px){#zte_panel{left:8px !important;right:8px !important;width:auto !important;max-width:none !important;max-height:90vh !important;} #zte_panel.minimized{left:auto !important; width:max-content !important;} #zte_panel.minimized #zte_hdr{gap:8px;} #zte_panel.minimized .zte_hdr_btns button:not(#zte_min_btn){display:none;} #zte_hdr h2{font-size:12px;}}",
       ".zte_unhidden{outline:1px dashed #F9A825 !important;outline-offset:-1px;}",
       "#zte_hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;",
       "background:linear-gradient(135deg,#1976D2,#1565C0);border-radius:12px 12px 0 0;cursor:move;user-select:none;flex-shrink:0;}",
@@ -3840,7 +3840,7 @@
     }
   }
 
-  function make_minimizable(panel) {
+function make_minimizable(panel) {
     var b = panel.querySelector("#zte_min_btn");
     var body = panel.querySelector("#zte_body");
     var foot = panel.querySelector("#zte_footer");
@@ -3848,6 +3848,14 @@
     var col = false;
     b.addEventListener("click", function () {
       col = !col;
+      
+      // Προσθήκη ή αφαίρεση της κλάσης 'minimized' στο πάνελ
+      if (col) {
+        panel.classList.add("minimized");
+      } else {
+        panel.classList.remove("minimized");
+      }
+      
       body.style.display = col ? "none" : "";
       foot.style.display = col ? "none" : "";
       b.textContent = col ? "+" : "−";

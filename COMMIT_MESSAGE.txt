@@ -1,0 +1,14 @@
+v2026-ng1.37: reconnect no longer leaves data off, phone layout
+
+- Reconnect: the "turn mobile data back on" step stays pending until the
+  router has accepted it. If the router ends the web session in the middle
+  (seen on the MC7530), the panel finishes the step after the next login
+  instead of dropping it. Gives up after 4 tries or 10 minutes.
+- The pending step is also finished when a lost session comes back without
+  a page reload, and sooner after a reload.
+- Calmer messages while a reconnect logs the page out and back in.
+- Narrow screens (phones): the panel fits the width.
+- When collapsed, narrower panel header, to give access to top left corner for ZTE's GUI options.
+- Tip box and README: the fork's tip link is now PayPal.
+- README: reconnect note, compatibility (1.37 checks on all three routers)
+  and version history.
