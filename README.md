@@ -54,7 +54,7 @@ The panel has four groups: **Dashboard** (always open), **RF Tuning & Locks**, *
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.36 the controls were run through on all three, except bridge mode, reboot and the TR-069 switches, which were not toggled on every unit. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.36 the controls were run through on all three, except bridge mode, reboot and the TR-069 switches, which were not toggled on every unit. For 1.37 automatic login, the guided cell lock and the reconnect were run again on all three. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
 
 ## Things to know before you click
 
@@ -70,7 +70,7 @@ Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.
 - **TR-069 (ACS)** is how an operator manages the router remotely. The panel can turn CWMP on or off and turn Periodic Inform on or off independently, and shows both states. It never reads or handles the ACS password — changes round-trip through the firmware's own functions, which keep the password inside the router. It is shown only where the router answers.
 - **Groups and sections fold away.** Click a group bar or a section title to collapse or expand it (▾ / ▸). The panel opens with Network and Signal expanded and the rest folded, and remembers your choice per router. Collapsing does not stop anything from updating — it just hides it.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
-- **Reconnect** switches mobile data off and on again. On some firmware (seen on the MC7530) the router also ends the web session when it does that. With a saved password the panel logs in again and finishes switching data back on by itself — this can take two page reloads and up to about a minute. Without a saved password you may have to log in and switch mobile data on yourself.
+- **Reconnect** switches mobile data off and on again. On some firmware (seen on the MC7530, and on a G5TC in bridge mode) the router stops answering for a while and then ends the web session when it does that. With a saved password the panel logs in again and makes sure mobile data is back on by itself — this can take one or two page reloads and up to about a minute and a half. Without a saved password, log in again and the panel switches mobile data back on.
 - **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic switching* in normal use. A change may ask for the router password (developer session) and lasts until the next reboot.
 - **Temperature control** is the firmware's protection against overheating; keep it on. If you turn it off, the router turns it back on after a restart.
 - **Session timeout** accepts 60–86400 seconds. Setting it is not offered by the router's own web interface; the panel uses the firmware's own call for it.
@@ -137,6 +137,7 @@ On top of that, this fork adds the following — all capability-gated, so a cont
 
 ### Version history
 
+- **1.37** — a reconnect no longer leaves mobile data off when the router ends the session in the middle of it (seen on the MC7530): the panel keeps the step pending until the router has accepted it, and finishes it after the next login; calmer messages while that happens; on a narrow screen (a phone) the panel now fits the width instead of running off the side.
 - **1.36** — the panel is regrouped into Dashboard, RF Tuning & Locks, Router Settings and Advanced Tools, with the active locks shown on the folded RF bar; guided LTE cell lock; automatic re-login when the router ends the session, with an interrupted reconnect or cell lock finished afterwards; Logout is recognised through the router's confirmation dialog; the unused "Neighbor Cells (raw)" section is gone.
 - **1.35** — credits and authorship (this section, header and footer).
 - **1.34** — removed a redundant 5G carrier badge; ARP proxy shows its default.
@@ -154,7 +155,7 @@ On top of that, this fork adds the following — all capability-gated, so a cont
 
 This panel exists because of other people's work:
 
-- **[papatsonis](https://github.com/papatsonis)** — this fork: the port to the ubus JSON-RPC API and the features in [What this fork adds](#what-this-fork-adds). Built on the work below; not maintained or endorsed by those authors. Tips: [buymeacoffee.com/papatsonis](https://buymeacoffee.com/papatsonis)
+- **[papatsonis](https://github.com/papatsonis)** — this fork: the port to the ubus JSON-RPC API and the features in [What this fork adds](#what-this-fork-adds). Built on the work below; not maintained or endorsed by those authors. Tips: [paypal.me/skaranik](https://paypal.me/skaranik)
 - **[Cerix](https://github.com/Cerix/zte-advanced-router-panel)** — *ZTE Advanced Router Panel* (MIT). The panel's design, layout and feature set come from it. Tips: [buymeacoffee.com/cerix](https://buymeacoffee.com/cerix)
 - **[Thomas Pöchtrager](https://github.com/tpoechtrager/ZTE-Web-Script)** — *ZTE-Script-NG* (AGPLv3+). The ubus calls, login flow, signal parsing and frequency tables come from it. Tips: PayPal `t.poechtrager@gmail.com`
 - **[open-u60-pro](https://github.com/jesther-ai/open-u60-pro)** by Jesther Silvestre and **[zte-u60-pro-mu5250-manager](https://github.com/faying/zte-u60-pro-mu5250-manager)** by faying (both MIT) — their research on the ZTE U60 Pro showed which ubus calls exist for the neighbor scan, mobile data on/off, DNS, APN, ARP proxy and resetting locks. Only the call and parameter names were used; no code from them is included.

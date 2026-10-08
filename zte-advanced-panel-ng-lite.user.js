@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.36
+// @version      2026-ng1.37
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -91,7 +91,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.36",
+    version: "2026-ng1.37",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -1003,19 +1003,43 @@
   function numish(v) {
     return v !== "" && v !== null && v !== undefined && !isNaN(v) ? Number(v) : v;
   }
-  function set_wwan(cur, enable) {
+  async function set_wwan(cur, enable) {
     var body = { cid: 1, connect_mode: numish(cur.connect_mode), roam_enable: numish(cur.roam_enable), enable: enable };
     if (!enable) body.connect_status = "disconnected";
-    return ubusRetry({ service: "zwrt_data", method: "set_wwaniface", params: body });
+    var r = await ubusRetry({ service: "zwrt_data", method: "set_wwaniface", params: body });
+    return r;
   }
+  function wwan_up(st) { return !!st && /^(connected|ipv4|ipv6)/i.test(String(st.connect_status || "")); }
   // On some firmware (seen on an MC7530) turning mobile data OFF also drops the WEB session, so
   // the "turn it back ON" step can be lost — the page reloads (auto-login / self-heal) before it
   // runs, leaving data off. A marker survives that reload: reconnect_resume_if_pending() (called
   // from start_panel) finishes the reconnect with the fresh session. Any normal completion of the
   // reconnect clears the marker, so it only persists when the reconnect was actually interrupted.
-  var RECONNECT_KEY = "ZtePanelReconnectPending"; // localStorage JSON { at, connect_mode, roam_enable }
-  function reconnect_mark(cur) { try { localStorage.setItem(RECONNECT_KEY, JSON.stringify({ at: Date.now(), connect_mode: cur.connect_mode, roam_enable: cur.roam_enable })); } catch (e) { /* ignore */ } }
+  var RECONNECT_KEY = "ZtePanelReconnectPending"; // localStorage JSON { at, connect_mode, roam_enable, tries }
+  var RECONNECT_MAX_TRIES = 4;   // how many login-resumes before giving up
+  var RECONNECT_MAX_AGE = 600000; // 10 min
+  function reconnect_mark(cur) { try { localStorage.setItem(RECONNECT_KEY, JSON.stringify({ at: Date.now(), connect_mode: cur.connect_mode, roam_enable: cur.roam_enable, tries: 0 })); } catch (e) { /* ignore */ } }
+  function reconnect_get() { try { return JSON.parse(localStorage.getItem(RECONNECT_KEY) || "null"); } catch (e) { return null; } }
   function reconnect_clear() { try { localStorage.removeItem(RECONNECT_KEY); } catch (e) { /* ignore */ } }
+
+  // Turn mobile data back on and clear the marker ONLY once that has gone through. If the ON is
+  // refused or never answered (after a data change the MC7530 stops answering for a while and then
+  // ends the web session), the marker is KEPT so the auto-login resume finishes it after the reload.
+  async function reconnect_turn_on(cur, where) {
+    var on = null;
+    for (var i = 0; i < 3 && !(on && on.success); i++) {
+      on = await set_wwan(cur, 1);
+      if (!(on && on.success)) await sleep(1500);
+    }
+    if (!(on && on.success)) { return false; }
+    reconnect_clear(); // ON accepted — data is coming on, nothing left to resume
+    for (var k = 0; k < 12; k++) {
+      await sleep(2000);
+      var st = await get_wwan();
+      if (wwan_up(st)) { toast("Reconnected ✓ (" + st.connect_status + ")", "ok"); poll_once(); return true; }
+    }
+    toast("Mobile data is on — waiting for the connection…", "warn"); return true;
+  }
 
   window.zte_wan_reconnect = async function () {
     var cur = await get_wwan();
@@ -1024,70 +1048,44 @@
       return;
     }
     if (!confirm("Reconnect mobile data?\n\nTurns mobile data OFF and back ON (not a reboot).\n" +
-      "Connection returns in about 10–20 s; the router may attach to a different cell.\n\n" +
+      "Connection returns in about 10–30 s. On some routers the web page logs you out while it does\n" +
+      "this — if a password is saved the panel logs in again and finishes by itself.\n\n" +
       "Current: connect_status=" + (cur.connect_status || "?") + ", connect_mode=" + cur.connect_mode + ", roaming=" + cur.roam_enable))
       return;
-    reconnect_mark(cur); // so an interrupting reload still finishes the "turn back on" step
+    reconnect_mark(cur); // survives a reload, so the "turn back on" step is never lost
     var off = await set_wwan(cur, 0);
     if (!off.success) {
-      reconnect_clear();
+      reconnect_clear(); // nothing changed — data is still on
       toast(off.accessDenied ? denied_msg("mobile data on/off") : "Data OFF failed (" + (off.error || "?") + ")", "error");
       return;
     }
-    toast("Mobile data OFF — turning it back on in 5 s…", "warn");
-    await sleep(5000);
-    var on = null;
-    for (var i = 0; i < 3 && !(on && on.success); i++) {
-      on = await set_wwan(cur, 1);
-      if (!on.success) await sleep(2000);
-    }
-    reconnect_clear(); // the reconnect ran to completion here (success or hard fail) — no resume needed
-    if (!on.success) {
-      toast("⚠️ Could not turn mobile data back ON.\nTurn it on in the router's own web page (Mobile data switch).", "error");
-      return;
-    }
-    toast("Mobile data ON — waiting for connection…", "info");
-    for (var k = 0; k < 15; k++) {
-      await sleep(2000);
-      var st = await get_wwan();
-      if (st && /^(connected|ipv4|ipv6)/i.test(String(st.connect_status || ""))) {
-        toast("Reconnected ✓ (" + st.connect_status + ")", "ok");
-        poll_once();
-        return;
-      }
-    }
-    toast("Data is ON but not connected yet — give it a moment.", "warn");
+    toast("Mobile data off — reconnecting…", "warn", 9000);
+    await sleep(4000); // let the disconnect settle (fast on most firmware)
+    if (await reconnect_turn_on(cur, "reconnect")) return; // G5TC / MC8532B finish here
+    // The ON did not go through: the router dropped the session with the data (MC7530). The marker
+    // is kept — the page reloads (self-heal), logs in again, and the resume turns data back on.
+    toast("The router ended the session while reconnecting.\nThe panel logs in again and turns mobile data back on by itself.", "warn", 12000);
   };
 
-  // Called from start_panel: if a reconnect was interrupted (its marker survived a reload), turn
-  // mobile data back on now, with the fresh session. This is what makes the MC7530 case recover.
+  // Called from start_panel (after a reload / automatic login) and from wait_for_session (when a
+  // lost session comes back without a reload). If a reconnect was interrupted, turn mobile data
+  // back on now. This is what makes the MC7530 case recover without the user touching the switch.
   async function reconnect_resume_if_pending() {
-    var raw = null; try { raw = localStorage.getItem(RECONNECT_KEY); } catch (e) { /* ignore */ }
-    if (!raw) return;
-    var st = null; try { st = JSON.parse(raw); } catch (e) { /* ignore */ }
-    if (!st || Date.now() - (st.at || 0) > 180000) { reconnect_clear(); return; } // gone or stale
-    toast("Finishing the mobile-data reconnect — turning data back on…", "info", 7000);
-    var cur = { connect_mode: st.connect_mode, roam_enable: st.roam_enable };
-    var on = null;
-    for (var i = 0; i < 3 && !(on && on.success); i++) {
-      on = await set_wwan(cur, 1);
-      if (!(on && on.success)) await sleep(2000);
+    if (S.reconnect_running || S.reconnect_resuming) return;
+    var st = reconnect_get();
+    if (!st) return;
+    if (Date.now() - (st.at || 0) > RECONNECT_MAX_AGE) { reconnect_clear(); return; }
+    if ((st.tries || 0) >= RECONNECT_MAX_TRIES) { reconnect_clear(); toast("Could not finish the reconnect — turn mobile data on in the router's own page.", "warn", 10000); return; }
+    st.tries = (st.tries || 0) + 1; try { localStorage.setItem(RECONNECT_KEY, JSON.stringify(st)); } catch (e) {}
+    S.reconnect_resuming = true;
+    try {
+      toast("Finishing the mobile-data reconnect — turning data back on…", "info", 7000);
+      await reconnect_turn_on({ connect_mode: st.connect_mode, roam_enable: st.roam_enable }, "resume");
+    } catch (e) {
+      // marker stays (unless ON cleared it); the next login tries again
+    } finally {
+      S.reconnect_resuming = false;
     }
-    reconnect_clear();
-    if (!(on && on.success)) {
-      toast("Could not finish the reconnect — turn mobile data on in the router's own page.", "warn", 10000);
-      return;
-    }
-    for (var k = 0; k < 12; k++) {
-      await sleep(2000);
-      var s = await get_wwan();
-      if (s && /^(connected|ipv4|ipv6)/i.test(String(s.connect_status || ""))) {
-        toast("Mobile data is back on ✓ (" + s.connect_status + ")", "ok");
-        poll_once();
-        return;
-      }
-    }
-    toast("Mobile data turned on — waiting for the connection…", "info");
   }
 
   // ── Reset band + cell locks to firmware defaults ──
@@ -3146,12 +3144,18 @@
       S.poll_tick = 0;
       S.lost_checks = 0;
       S.self_heal_tried = false;
+      reconnect_resume_if_pending(); // a reconnect that lost its session: finish it now
       return;
     }
     S.lost_checks++;
     if (S.lost_checks === 2 && !S.expired_warned) {
       S.expired_warned = true;
-      toast("Router session ended — log in again on the router page.", "warn");
+      // A reconnect in progress drops the session on purpose on some routers (MC7530); keep the
+      // message calm and non-alarming in that case, since the panel will bring it back on its own.
+      if (reconnect_get())
+        toast("Reconnecting mobile data — the session dropped as expected and will come back by itself.", "info", 7000);
+      else
+        toast("Router session ended — log in again on the router page.", "warn");
     }
     // Self-heal: the router dropped the session while the page stayed open (not a deliberate
     // logout). Reload once so the saved-password auto-login recovers, instead of waiting for a
@@ -3160,7 +3164,12 @@
     if (!S.self_heal_tried && S.lost_checks >= 3 && saved_hash() && !just_logged_out() &&
         ms_since(sessionStorage, TRIED_KEY) > 90000) {
       S.self_heal_tried = true;
-      toast("Session lost — reloading to log back in automatically…", "info", 6000);
+      // During a mobile-data reconnect the page may refresh once or twice while the router logs
+      // back in — say so plainly so it does not read as an error.
+      if (reconnect_get())
+        toast("Reconnecting mobile data — the page may refresh once or twice to log back in. This is normal on this router.", "info", 7000);
+      else
+        toast("Session lost — reloading to log back in automatically…", "info", 6000);
       setTimeout(function () { location.reload(); }, 1500);
     }
   }
@@ -3412,10 +3421,11 @@
     var s = document.createElement("style");
     s.id = "zte_tm_style";
     s.textContent = [
-      "#zte_panel{position:fixed;top:12px;left:12px;z-index:2147483646;width:454px;max-height:94vh;",
+      "#zte_panel{position:fixed;top:12px;left:12px;z-index:2147483646;width:454px;max-width:calc(100vw - 24px);max-height:94vh;",
       "background:#FFFFFF;color:#37474F;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.15);",
       'font-family:"Segoe UI",Verdana,sans-serif;font-size:12px;border:1px solid #B0BEC5;display:flex;flex-direction:column;}',
       "#zte_panel *,#zte_modal *{box-sizing:border-box;}",
+      "@media (max-width:480px){#zte_panel{left:8px !important;right:8px !important;width:auto !important;max-width:none !important;max-height:90vh !important;}#zte_hdr h2{font-size:12px;}}",
       ".zte_unhidden{outline:1px dashed #F9A825 !important;outline-offset:-1px;}",
       "#zte_hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;",
       "background:linear-gradient(135deg,#1976D2,#1565C0);border-radius:12px 12px 0 0;cursor:move;user-select:none;flex-shrink:0;}",
@@ -3737,9 +3747,9 @@
       (CFG.bmac
         ? '<div class="zte_sec" style="text-align:center;background:#FFF8E1;border-color:#FFE082;">' +
           '<div style="font-size:11px;color:#546E7A;margin-bottom:8px;">If this fork saves you time, a small tip is appreciated 🙂<br>It builds on the work of Cerix and Thomas Pöchtrager — tips to them too.</div>' +
-          '<div style="margin-bottom:6px;"><a href="https://buymeacoffee.com/papatsonis" target="_blank" rel="noopener noreferrer" ' +
-          'style="display:inline-block;width:310px;box-sizing:border-box;white-space:nowrap;background:#FFDD00;color:#000;font-weight:700;font-size:12px;padding:6px 10px;' +
-          'border-radius:8px;text-decoration:none;border:2px solid #F0C800;">☕ Buy Me a Coffee — papatsonis (this fork)</a></div>' +
+          '<div style="margin-bottom:6px;"><a href="https://paypal.me/skaranik" target="_blank" rel="noopener noreferrer" ' +
+          'style="display:inline-block;width:310px;box-sizing:border-box;white-space:nowrap;background:#0070BA;color:#FFFFFF;font-weight:700;font-size:12px;padding:6px 10px;' +
+          'border-radius:8px;text-decoration:none;border:2px solid #005EA6;">Tip via PayPal — papatsonis (this fork)</a></div>' +
           '<div><a href="https://buymeacoffee.com/cerix" target="_blank" rel="noopener noreferrer" ' +
           'style="display:inline-block;width:310px;box-sizing:border-box;white-space:nowrap;background:#FFDD00;color:#000;font-weight:700;font-size:12px;padding:6px 10px;' +
           'border-radius:8px;text-decoration:none;border:2px solid #F0C800;">☕ Buy Me a Coffee — Cerix</a></div>' +
@@ -3876,7 +3886,7 @@
     setTimeout(load_tr069_cap, 4500); // TR-069 state (once)
     start_hidden_menus();
     setTimeout(glock_resume_if_pending, 6500); // finish a guided LTE lock that a session drop interrupted
-    setTimeout(reconnect_resume_if_pending, 4500); // finish a mobile-data reconnect a reload interrupted
+    setTimeout(reconnect_resume_if_pending, 600); // finish a mobile-data reconnect a reload interrupted — fire early to shorten the offline gap
     toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");
   }
 
