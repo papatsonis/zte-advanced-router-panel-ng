@@ -10,10 +10,6 @@ This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advance
 
 *The Lite edition with demo data: how it opens (left) and with the three groups unfolded (right).*
 
-![Mobile View with panel folded (left) and unfolded (right)](img/mobile.png)
-
-*Mobile View with panel folded (left) and unfolded (right).*
-
 ## Two editions
 
 | Edition | For | Install |
@@ -41,10 +37,10 @@ The panel has four groups: **Dashboard** (always open), **RF Tuning & Locks**, *
 | **Signal** | One card per LTE and 5G carrier: RSRP, RSRQ, SINR, RSSI, (E)ARFCN, PCI, bandwidth, frequency; copy a signal report |
 | **ODU antenna selection** | Automatic, directional (front), directional wide beam (rear) or omnidirectional. The options and their names are read from the router's own Developer options page. Shown only on models that have this setting |
 | **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
-| **Connection** | Reconnect mobile data, DNS (manual or operator), bridge mode on/off, ARP proxy on/off, reboot |
+| **Connection** | Reconnect mobile data, DNS (manual IPv4 and IPv6, or operator), bridge mode on/off, ARP proxy on/off, reboot |
 | **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
 | **LTE bands / 5G bands** | One-click band locks with live status. Each frame lists the bands your router supports (read from the router); a button that needs a band it does not have is left out, and such a band is refused in "Custom". A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
-| **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks. An LTE cell lock is applied in steps — LTE only, lock, back to the mode you were in — because a lock set directly in 5G NSA stalls the connection |
+| **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks. What you type is checked before anything is sent (PCI range, channel range, and for 5G that the channel belongs to the band). A 5G cell lock is read back to confirm the router stored it. An LTE cell lock is applied in steps — LTE only, lock, back to the mode you were in — because a lock set directly in 5G NSA stalls the connection; if the router does not switch to LTE only, nothing is locked and your mode is put back |
 | **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
 | **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
 | **GPS** | Whether the router has GPS, and its position with a map link. Says "not available on this router" when it has none |
@@ -58,7 +54,7 @@ The panel has four groups: **Dashboard** (always open), **RF Tuning & Locks**, *
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.36 the controls were run through on all three, except bridge mode, reboot and the TR-069 switches, which were not toggled on every unit. For 1.37 automatic login, the guided cell lock and the reconnect were run again on all three. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.36 the controls were run through on all three, except bridge mode, reboot and the TR-069 switches, which were not toggled on every unit. For 1.37 automatic login, the guided cell lock and the reconnect were run again on all three; for 1.38 the cell locks, manual DNS with IPv6, the guided cell lock and the reconnect. The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
 
 ## Things to know before you click
 
@@ -74,7 +70,9 @@ Tested on a **ZTE MC7530**, an **MC8532B** and a **G5TC** (B07 firmware). For 1.
 - **TR-069 (ACS)** is how an operator manages the router remotely. The panel can turn CWMP on or off and turn Periodic Inform on or off independently, and shows both states. It never reads or handles the ACS password — changes round-trip through the firmware's own functions, which keep the password inside the router. It is shown only where the router answers.
 - **Groups and sections fold away.** Click a group bar or a section title to collapse or expand it (▾ / ▸). The panel opens with Network and Signal expanded and the rest folded, and remembers your choice per router. Collapsing does not stop anything from updating — it just hides it.
 - **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
-- **Reconnect** switches mobile data off and on again. On some firmware (seen on the MC7530, and on a G5TC in bridge mode) the router stops answering for a while and then ends the web session when it does that. With a saved password the panel logs in again and makes sure mobile data is back on by itself — this can take one or two page reloads and up to about a minute and a half. Without a saved password, log in again and the panel switches mobile data back on.
+- **Reconnect** switches mobile data off and on again. On some firmware (seen on the MC7530 and, at times, on a G5TC) the router stops answering for a while and then ends the web session when it does that. With a saved password the panel logs in again and makes sure mobile data is back on by itself — this can take one or two page reloads and up to about a minute and a half. Without a saved password, log in again and the panel switches mobile data back on.
+- **Manual DNS** takes IPv4 and, optionally, IPv6 (primary, secondary). In the IPv6 prompt, keep the values shown to keep them; leave it empty or type `-` for no IPv6 DNS; `-` in one place clears just that one (e.g. `2606:4700:4700::1111,-`). In automatic mode some routers show the operator's DNS instead of the stored manual values.
+- **Router restarts** — if the router started up within the last 10 minutes (a power cut, a reboot), the panel says so once. That tells a restart apart from the router just ending the web session.
 - **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic switching* in normal use. A change may ask for the router password (developer session) and lasts until the next reboot.
 - **Temperature control** is the firmware's protection against overheating; keep it on. If you turn it off, the router turns it back on after a restart.
 - **Session timeout** accepts 60–86400 seconds. Setting it is not offered by the router's own web interface; the panel uses the firmware's own call for it.
@@ -115,6 +113,8 @@ python3 tools/build_lite.py
 
 The build stops with an error if the full script has changed in a way it does not expect, rather than producing a broken Lite edition.
 
+Five quick clicks on the panel's footer switch on verbose logging in the browser console (and off again); the setting is remembered in the browser.
+
 ## What this fork adds
 
 This fork brings together **Cerix's panel** (designed for ZTE's older routers) and the **ubus foundation of ZTE-Script-NG** (a monitoring-and-locking panel for the newer G5TC-and-later models), then extends it with a large set of **control** features — tested across the MC7530, MC8532B and G5TC.
@@ -123,7 +123,7 @@ From ZTE-Script-NG it inherits the ubus groundwork: signal monitoring, band and 
 
 On top of that, this fork adds the following — all capability-gated, so a control appears only if the router answers for it:
 
-- **Connection controls** — reconnect mobile data, DNS settings, bridge mode on/off, reboot.
+- **Connection controls** — reconnect mobile data, DNS settings (IPv4 and IPv6), bridge mode on/off, reboot.
 - **ARP proxy** on/off.
 - **Neighbor scan & force connect** — run the router's scan and lock to any cell it finds.
 - **APN** — view and switch profile.
@@ -135,14 +135,15 @@ On top of that, this fork adds the following — all capability-gated, so a cont
 - **TR-069 (ACS)** — CWMP and Periodic Inform toggles, without the panel ever handling the ACS password.
 - **Hidden menus & pages** — reveals, and can open, pages the firmware hides (TR-069 config, Developer options).
 - **Four groups with collapsible sections**, remembered per router, and a lock summary on the folded RF bar.
-- **Guided LTE cell lock** — LTE only, lock, back to your mode, so the lock takes without stalling 5G NSA.
+- **Guided LTE cell lock** — LTE only, lock, back to your mode, so the lock takes without stalling 5G NSA. Cell-lock entries are checked first, and a 5G cell lock is read back.
 - **Recovery from a lost session** — with a saved password the panel logs in again when the router ends the session, and finishes a reconnect or cell lock that was cut off.
 - **Two editions** — Lite (everyday) and Full (adds API-exploration tools), with Lite generated from Full by a build script.
 
 ### Version history
 
-- **1.37** — more reliable resume for interrupted mobile data reconnects; responsive mobile UI; narrower collapsed header for native GUI access.
-- **1.36** — UI regrouped with active lock indicators; guided LTE cell lock; automatic re-login with task resumption; native logout detection; removed raw neighbor cells.
+- **1.38** — manual DNS takes IPv6 too (primary and secondary, or cleared); cell-lock entries are checked before anything is sent, and a 5G cell lock is read back to confirm it was stored; the guided LTE cell lock stops and restores your mode if the router does not switch to LTE only; a reconnect whose last step the router refuses while you are still logged in is finished in the page (it checks whether data is already back first); the panel says when the router has just restarted; lighter polling (one request at a time); the built-in SHA-256 used for auto login on plain-http pages was wrong for some input lengths and is fixed; 5G channels in the n77/n78 overlap are labelled as such in the neighbor scan; Esc closes the panel's dialogs; the minimised panel is smaller on phones; five clicks on the footer switch on verbose console logging.
+- **1.37** — a reconnect no longer leaves mobile data off when the router ends the session in the middle of it (seen on the MC7530): the panel keeps the step pending until the router has accepted it, and finishes it after the next login; calmer messages while that happens; on a narrow screen (a phone) the panel now fits the width instead of running off the side.
+- **1.36** — the panel is regrouped into Dashboard, RF Tuning & Locks, Router Settings and Advanced Tools, with the active locks shown on the folded RF bar; guided LTE cell lock; automatic re-login when the router ends the session, with an interrupted reconnect or cell lock finished afterwards; Logout is recognised through the router's confirmation dialog; the unused "Neighbor Cells (raw)" section is gone.
 - **1.35** — credits and authorship (this section, header and footer).
 - **1.34** — removed a redundant 5G carrier badge; ARP proxy shows its default.
 - **1.33** — collapsible sections, remembered per router.

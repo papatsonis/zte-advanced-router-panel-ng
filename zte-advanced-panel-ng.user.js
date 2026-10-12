@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.37
+// @version      2026-ng1.38
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections, plus developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -88,7 +88,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.37",
+    version: "2026-ng1.38",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -104,6 +104,15 @@
     lte_all_bands: [1, 3, 7, 8, 20, 28, 38, 40, 41, 42, 43],
     nr_all_bands: ["1", "3", "7", "8", "20", "28", "38", "40", "41", "75", "77", "78"],
     nr_type_variants: ["1", "NSA", "nsa", "ENDC", "LTE_AND_5G"], // extra values tried by "Probe 5G NSA lock"
+    // Debug: set localStorage ZtePanelDebug=1 (or click the footer version 5×) to log ubus/actions.
+    debug: false,
+    // Shared timing budgets (was scattered magic numbers)
+    settleMs: 1500,
+    reconnectOffWaitMs: 4000,
+    scanSettleMs: 6000,
+    scanPollMs: 3000,
+    modeWaitMs: 20000,
+    modePollMs: 1500,
   };
 
   var ZERO_SID = "00000000000000000000000000000000";
@@ -144,7 +153,9 @@
   }
   function zset(id, t) {
     var e = zel(id);
-    if (e) e.textContent = t !== undefined && t !== null ? t : "";
+    if (!e) return;
+    t = t !== undefined && t !== null ? String(t) : "";
+    if (e.textContent !== t) e.textContent = t;
   }
   function zhtml(id, h) {
     var e = zel(id);
@@ -243,7 +254,8 @@
     for (var i = 0; i < len; i++)
       words[i >> 2] = (words[i >> 2] || 0) | (bytes.charCodeAt(i) << (24 - (i % 4) * 8));
     words[len >> 2] = (words[len >> 2] || 0) | (0x80 << (24 - (len % 4) * 8));
-    var padded = (((len + 9) >> 6) + 1) * 16;
+    // ceil((len+9)/64)*16. The old ">> 6 + 1" adds an extra block when len is 55, 119, …
+    var padded = Math.ceil((len + 9) / 64) * 16;
     words[padded - 1] = len * 8;
     words[padded - 2] = (len / 0x20000000) | 0;
     var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
@@ -303,6 +315,12 @@
         signal: ctrl.signal,
       });
       json = await r.json();
+    } catch (e) {
+      clearTimeout(to);
+      var msg = e && e.name === "AbortError" ? "timeout" : (e && e.message || "fetch failed");
+      // network: true = no answer at all (timeout / connection error), as opposed to a refusal
+      var fails = arr.map(function () { return { success: false, data: null, error: msg, network: true }; });
+      return Array.isArray(calls) ? fails : fails[0];
     } finally {
       clearTimeout(to);
     }
@@ -315,11 +333,13 @@
       if (x.error) {
         if (!opts.quiet)
           console.warn("[ZTE] ubus error", rq.params[1] + "." + rq.params[2], x.error);
+        dlog("ubus error", rq.params[1] + "." + rq.params[2], x.error);
         return { success: false, data: null, accessDenied: x.error.code === -32002, error: x.error.message };
       }
       var res = x.result || [];
       if (res[0] === 0) return { success: true, data: res.length > 1 ? res[1] : null };
       if (!opts.quiet) console.warn("[ZTE] ubus failed", rq.params[1] + "." + rq.params[2], "code", res[0]);
+      dlog("ubus failed", rq.params[1] + "." + rq.params[2], "code", res[0]);
       return { success: false, data: null, code: res[0], error: "code " + res[0] };
     });
     return Array.isArray(calls) ? out : out[0];
@@ -327,14 +347,27 @@
 
   async function ubusRetry(calls, opts, max) {
     max = max || CFG.retryOnAccessDenied;
-    var res;
-    for (var i = 0; i < max; i++) {
-      if (i) await new Promise(function (r) { setTimeout(r, 250); }); // never hammer the router
-      res = await ubus(calls, opts);
-      var denied = Array.isArray(res) ? res.some(function (r) { return r.accessDenied; }) : res.accessDenied;
-      if (!denied) break;
+    var many = Array.isArray(calls);
+    var pending = many ? calls.slice() : [calls];
+    var out = new Array(pending.length);
+    var idx = pending.map(function (_, i) { return i; });
+    for (var attempt = 0; attempt < max && idx.length; attempt++) {
+      if (attempt) await new Promise(function (r) { setTimeout(r, 250); }); // never hammer the router
+      var slice = idx.map(function (i) { return pending[i]; });
+      var res = await ubus(slice, opts);
+      var list = Array.isArray(res) ? res : [res];
+      var next = [];
+      for (var j = 0; j < idx.length; j++) {
+        var one = list[j] || { success: false, error: "no response" };
+        if (one.accessDenied) next.push(idx[j]);
+        else out[idx[j]] = one;
+      }
+      idx = next;
     }
-    return res;
+    idx.forEach(function (i) {
+      if (!out[i]) out[i] = { success: false, accessDenied: true, error: "Access denied" };
+    });
+    return many ? out : out[0];
   }
 
   // Run a setter, show a toast, refresh the panel
@@ -376,12 +409,82 @@
   //     The flag lives in localStorage ONLY: the router's page scrubs sessionStorage on its route
   //     changes (seen live on the G5TC — a sessionStorage marker vanished while the user sat on
   //     the confirm dialog), so sessionStorage cannot hold anything that must outlive a click.
-  var PW_KEY = "ZtePanelPwHash";          // localStorage: SHA256 of the password, if saved
-  var TRIED_KEY = "ZtePanelAutoLoginAt";  // sessionStorage (per tab): an automatic login + reload is under way (no reload loops)
-  var USER_LOGOUT_KEY = "ZtePanelUserLogoutAt"; // localStorage: the user initiated/confirmed a logout (a deliberate logout, not a forced one)
-  var SEEN_KEY = "ZtePanelSeenAlive";     // sessionStorage (per tab): time of the last successful poll
+  // ── Centralized storage keys (localStorage / sessionStorage) ──
+  var LS = {
+    PW: "ZtePanelPwHash",                 // localStorage: SHA256 of the password, if saved
+    TRIED: "ZtePanelAutoLoginAt",         // sessionStorage: auto-login + reload in progress
+    USER_LOGOUT: "ZtePanelUserLogoutAt",  // localStorage: deliberate logout marker
+    SEEN: "ZtePanelSeenAlive",            // sessionStorage: last successful poll
+    NSA_TYPE: "ZtePanelNrNsaType",        // localStorage: remembered NR NSA type string
+    BOOT_SEEN: "ZtePanelBootSeen",        // localStorage: router boot time already announced (ms)
+    RECONNECT: "ZtePanelReconnectPending",// localStorage JSON: interrupted data reconnect
+    GLOCK: "ZtePanelGuidedLock",          // localStorage JSON: guided LTE lock state machine
+    HIDDEN: "ZtePanelHiddenMenus",        // localStorage: "1" = show hidden menus
+    DEBUG: "ZtePanelDebug",               // localStorage: "1" = verbose console logging
+    LEGACY_LOGOUT: "ZtePanelLogoutAt",    // removed leftover from older versions
+    LEGACY_PW: "ScriptPasswordHash",      // removed leftover from ng≤1.23
+  };
+  function collapse_ls_key() { return "ZtePanelCollapse2:" + location.hostname; }
+
   var USER_LOGOUT_WINDOW = 60000;         // ms after a (confirmed) Logout during which the saved password is not used
   var LOGOUT_CONFIRM_WINDOW = 60000;      // ms after a Logout click during which a Yes/No in a confirm dialog still counts
+
+  // Aliases kept so the rest of the file reads cleanly (point at LS.*)
+  var PW_KEY = LS.PW;
+  var TRIED_KEY = LS.TRIED;
+  var USER_LOGOUT_KEY = LS.USER_LOGOUT;
+  var SEEN_KEY = LS.SEEN;
+
+  function dlog() {
+    if (!CFG.debug) return;
+    try { console.log.apply(console, ["[ZTE]"].concat([].slice.call(arguments))); } catch (e) { /* ignore */ }
+  }
+
+  function lsGetJson(key, maxAge, ageField) {
+    try {
+      var o = JSON.parse(localStorage.getItem(key) || "null");
+      if (!o) return null;
+      var t = o[ageField || "at"] || o.startedAt || 0;
+      if (maxAge && t && Date.now() - t > maxAge) {
+        localStorage.removeItem(key);
+        return null;
+      }
+      return o;
+    } catch (e) { return null; }
+  }
+
+  // One mutating operation per document. Reload-safe work stays in localStorage.
+  function op_current() {
+    return S.op || null;
+  }
+  function op_start(name) {
+    if (S.op && S.op !== name) {
+      toast(name + " skipped — " + S.op + " is still running.", "warn");
+      return false;
+    }
+    if (S.op === name) return false;
+    S.op = name;
+    S.pause_poll = name === "scan" || name === "glock" || name === "reconnect";
+    return true;
+  }
+  function op_end(name) {
+    if (S.op === name) S.op = null;
+    if (!S.op) S.pause_poll = false;
+  }
+
+  function resetSessionFlags() {
+    S.session_lost = false;
+    S.expired_warned = false;
+    S.lost_checks = 0;
+    S.self_heal_tried = false;
+  }
+
+  // Single place to resume interrupted work after a session comes back
+  async function onSessionRestored() {
+    dlog("onSessionRestored");
+    try { await reconnect_resume_if_pending(); } catch (e) { dlog("reconnect resume error", e && e.message); }
+    try { glock_resume_if_pending(); } catch (e) { dlog("glock resume error", e && e.message); }
+  }
 
   function saved_hash() {
     try { return localStorage.getItem(PW_KEY); } catch (e) { return null; }
@@ -427,6 +530,35 @@
   }
   var CONFIRM_RE = /^(yes|ok|okay|confirm|sure|ναι|εντάξει|ενταξει|确定|确认|是|好)$/i;
   var CANCEL_RE  = /^(no|cancel|όχι|οχι|άκυρο|ακυρο|取消|否)$/i;
+  function in_confirm_dialog(node) {
+    for (var el = node, hops = 0; el && el.nodeType === 1 && hops < 8; el = el.parentElement, hops++) {
+      if (el.getAttribute && el.getAttribute("role") === "dialog") return true;
+      var cls = String(el.className || "").toLowerCase();
+      if (/\b(modal|dialog|confirm|popup|alert)\b/.test(cls)) return true;
+    }
+    return false;
+  }
+
+  // Some firmware shows a "please log in again" dialog over the login page. Press its OK, but only
+  // inside a visible dialog of the router's own page whose text says so (never the panel or a toast).
+  function dismiss_login_again() {
+    var RE = /please log ?in again|log in again|session (has )?expired|session timeout/i;
+    var boxes = document.querySelectorAll('[role="dialog"], .modal, .dialog, .popup, .messager-window');
+    for (var i = 0; i < boxes.length; i++) {
+      var box = boxes[i];
+      if (in_panel(box) || box.id === "zte_modal") continue;
+      if (!box.offsetWidth && !box.offsetHeight) continue; // not shown
+      if (!RE.test(box.innerText || "")) continue;
+      var btns = box.querySelectorAll("button, input[type=button], a");
+      for (var j = 0; j < btns.length; j++) {
+        var label = (btns[j].textContent || btns[j].value || "").trim();
+        if (/^(ok|okay|yes|confirm|εντάξει|ενταξει)$/i.test(label)) {
+          try { btns[j].click(); dlog("dismissed a 'log in again' dialog"); return true; } catch (e) { /* ignore */ }
+        }
+      }
+    }
+    return false;
+  }
 
   // Watch for a genuine, user-generated click on a logout control anywhere on the router's page.
   // event.isTrusted is true only for real user input, so a forced/programmatic logout never
@@ -443,7 +575,8 @@
         }
         // A Yes/No that follows a recent logout click is the confirm dialog's answer. The recency
         // of USER_LOGOUT_KEY itself is the "a logout is pending" signal — no sessionStorage needed.
-        if (ms_since(localStorage, USER_LOGOUT_KEY) < LOGOUT_CONFIRM_WINDOW) {
+        // Yes/No counts only inside a confirm dialog. A bare OK elsewhere must not refresh the logout flag.
+        if (ms_since(localStorage, USER_LOGOUT_KEY) < LOGOUT_CONFIRM_WINDOW && in_confirm_dialog(e.target)) {
           if (el_label_is(e.target, CONFIRM_RE)) {
             stamp(localStorage, USER_LOGOUT_KEY);  // confirmed — measure the skip window from now
           } else if (el_label_is(e.target, CANCEL_RE)) {
@@ -561,26 +694,84 @@
     return null;
   }
 
+  // [band, first DL NR-ARFCN, last DL NR-ARFCN]
+  // n77 (3300–4200, 620000–680000) overlaps n78 (3300–3800, 620000–653333).
+  // In the overlap the channel alone cannot name the band (3GPP TS 38.101-1).
+  var NR_ARFCN_BANDS = [
+    [1, 422000, 434000], [3, 361000, 376000], [5, 173800, 178800], [7, 524000, 538000],
+    [8, 185000, 192000], [28, 151600, 160600], [40, 460000, 480000], [41, 499200, 537999],
+    [75, 286400, 303400], [77, 620000, 680000], [78, 620000, 653333], [79, 693334, 733333],
+    [257, 2054167, 2104166], [258, 2016667, 2070833], [260, 2229167, 2279166], [261, 2070833, 2084999],
+  ];
+  var NR_ARFCN_MAX = 3279165;   // highest global NR-ARFCN (TS 38.104)
+  var LTE_EARFCN_MAX = 262143;  // highest LTE EARFCN (TS 36.101)
   function nr_arfcn_to_mhz(arfcn) {
     function f(N) {
       if (N >= 0 && N <= 599999) return 0.005 * N;
       if (N >= 600000 && N <= 2016666) return 3000 + 0.015 * (N - 600000);
-      if (N >= 2016667 && N <= 3279165) return 24250 + 0.06 * (N - 2016667);
+      if (N >= 2016667 && N <= NR_ARFCN_MAX) return 24250 + 0.06 * (N - 2016667);
       return null;
     }
-    var t = [
-      [1, 422000, 434000], [3, 361000, 376000], [5, 173800, 178800], [7, 524000, 538000],
-      [8, 185000, 192000], [28, 151600, 160600], [40, 460000, 480000], [41, 499200, 537999],
-      [75, 286400, 303400], [78, 620000, 653333], [79, 693334, 733333],
-      [257, 2054167, 2104166], [258, 2016667, 2070833], [260, 2229167, 2279166], [261, 2070833, 2084999],
-    ];
+    var t = NR_ARFCN_BANDS;
+    var hits = [];
     for (var i = 0; i < t.length; i++) {
-      if (arfcn >= t[i][1] && arfcn <= t[i][2]) {
-        var m = f(arfcn);
-        return m === null ? null : { band: t[i][0], mhz: +m.toFixed(2) };
-      }
+      if (arfcn >= t[i][1] && arfcn <= t[i][2]) hits.push(t[i][0]);
     }
-    return null;
+    var mhz = f(arfcn);
+    if (mhz === null || !hits.length) return null;
+    return { band: hits.length === 1 ? hits[0] : null, bands: hits, mhz: +mhz.toFixed(2) };
+  }
+  // Firmware band wins. ARFCN names the band only when exactly one range matches.
+  function nr_band(reported, conv) {
+    var fw = strip_n(reported);
+    if (/^\d+$/.test(fw)) return fw;
+    return conv && conv.band != null ? String(conv.band) : "";
+  }
+
+  // ── Cell-lock input checks ──
+  // Whole non-negative numbers only: no sign, decimals, exponent or hex ("-1", "202.5", "1e3", "0x10").
+  // Returns the number as a clean decimal string, or null.
+  function cell_int(x) {
+    x = String(x === undefined || x === null ? "" : x).trim();
+    return /^\d{1,7}$/.test(x) ? String(parseInt(x, 10)) : null;
+  }
+  // LTE: PCI 0–503, EARFCN 0–262143. Returns { pci, earfcn } or { error }.
+  function check_lte_cell(pci, earfcn) {
+    var p = cell_int(pci), e = cell_int(earfcn);
+    if (p === null || e === null) return { error: "PCI and EARFCN must be whole numbers" };
+    if (+p > 503) return { error: "LTE PCI must be between 0 and 503" };
+    if (+e > LTE_EARFCN_MAX) return { error: "EARFCN must be between 0 and " + LTE_EARFCN_MAX };
+    return { pci: p, earfcn: e };
+  }
+  // NR: PCI 0–1007, NR-ARFCN 0–3279165, and the ARFCN must sit inside the band when the panel
+  // knows that band's range (n77/n78 overlap allowed). Returns { pci, arfcn, band } or { error }.
+  function check_nr_cell(pci, arfcn, band) {
+    var p = cell_int(pci), a = cell_int(arfcn), b = cell_int(strip_n(band));
+    if (p === null || a === null || b === null) return { error: "PCI, ARFCN and band must be whole numbers" };
+    if (+p > 1007) return { error: "5G PCI must be between 0 and 1007" };
+    if (+a > NR_ARFCN_MAX) return { error: "NR-ARFCN must be between 0 and " + NR_ARFCN_MAX };
+    if (+b < 1) return { error: "Band must be a 5G band number, e.g. 78" };
+    var range = null;
+    NR_ARFCN_BANDS.forEach(function (r) { if (r[0] === +b) range = r; });
+    if (range && (+a < range[1] || +a > range[2])) {
+      var conv = nr_arfcn_to_mhz(+a);
+      return { error: "ARFCN " + a + " is not in n" + b + " (" + range[1] + "–" + range[2] + ")" +
+        (conv && conv.bands.length ? " — it belongs to n" + conv.bands.join("/n") : "") };
+    }
+    return { pci: p, arfcn: a, band: b };
+  }
+  // lock_nr_cell as the router reports it: "" or "0,0,0" when unlocked.
+  function nr_cell_tokens(v) {
+    return String(v || "").split(",").map(function (x) { return strip_n(x); }).filter(function (x) { return x !== ""; });
+  }
+  function nr_cell_unlocked(v) {
+    return nr_cell_tokens(v).every(function (x) { return /^0+$/.test(x); });
+  }
+  // The field order of lock_nr_cell differs between firmwares, so compare the three values as a set.
+  function nr_cell_matches(v, pci, arfcn, band) {
+    var have = nr_cell_tokens(v).map(function (x) { return String(parseInt(x, 10)); }).sort().join(",");
+    var want = [pci, arfcn, band].map(function (x) { return String(parseInt(x, 10)); }).sort().join(",");
+    return have === want;
   }
 
   // ─────────────────────────────────────────────
@@ -654,7 +845,7 @@
         bandwidth: parseInt(d.nr5g_bandwidth, 10),
         rsrp: num(d.nr5g_rsrp), rsrq: num(d.nr5g_rsrq), sinr: num(d.nr5g_snr), rssi: num(d.nr5g_rssi),
         ul: true, active: true,
-        band: conv ? String(conv.band) : strip_n(d.nr5g_action_band),
+        band: nr_band(d.nr5g_action_band, conv),
         freq: conv ? conv.mhz : null,
       });
     }
@@ -674,7 +865,7 @@
           sinr: unmeasured ? null : num(p[9]), rssi: unmeasured ? null : num(p[10]),
           ul: parseInt(p[0], 10) === 1,
           active: parseInt(p[2], 10) === 2,
-          band: cv ? String(cv.band) : strip_n(p[3]),
+          band: nr_band(p[3], cv),
           freq: cv ? cv.mhz : null,
         });
       });
@@ -683,11 +874,14 @@
   }
 
   function net_flags(nt) {
+    var is_sa = nt === "SA";
+    var is_nsa = nt === "ENDC" || nt === "LTE-NSA";
     return {
-      is_lte: nt === "LTE" || nt === "ENDC" || nt === "LTE-NSA",
-      is_sa: nt === "SA",
-      is_nsa: nt === "ENDC" || nt === "LTE-NSA",
-      show_nr: nt === "SA" || nt === "ENDC",
+      is_lte: nt === "LTE" || is_nsa,
+      is_sa: is_sa,
+      is_nsa: is_nsa,
+      // LTE-NSA is the same NSA attach as ENDC; some firmwares report that string only.
+      show_nr: is_sa || is_nsa,
     };
   }
 
@@ -876,10 +1070,9 @@
   // both, so it applies whichever mode the router is in. "SA" is the type for the SA
   // list; for the NSA list firmwares differ, so the known values are tried in turn
   // and the one the router accepts is remembered.
-  var NSA_TYPE_KEY = "ZtePanelNrNsaType";
   var NSA_TYPES = ["1", "NSA"];
   function nsa_type() {
-    try { var v = localStorage.getItem(NSA_TYPE_KEY); if (v) return v; } catch (e) { /* ignore */ }
+    try { var v = localStorage.getItem(LS.NSA_TYPE); if (v) return v; } catch (e) { /* ignore */ }
     return NSA_TYPES[0];
   }
 
@@ -896,7 +1089,7 @@
     var r = await ubusRetry(nr_lock_call(type, bands));
     console.log("[ZTE] NR band lock type " + type + ", bands " + bands.join(",") + " ←", JSON.stringify(r));
     if (!r.success) return { ok: false, error: r.error };
-    await sleep(1500);
+    await sleep(CFG.settleMs);
     var d = await fresh_netinfo();
     if (!d) return { ok: true, checked: false };
     var f = nr_lock_fields(d), want = band_set(bands.join(","));
@@ -915,7 +1108,7 @@
       if (!res.ok) continue; // this firmware rejects that type — try the next one
       if (!res.checked) break;
       if (res[target]) {
-        if (target === "nsa" && types[i] !== first) { try { localStorage.setItem(NSA_TYPE_KEY, types[i]); } catch (e) { /* ignore */ } }
+        if (target === "nsa" && types[i] !== first) { try { localStorage.setItem(LS.NSA_TYPE, types[i]); } catch (e) { /* ignore */ } }
         break;
       }
     }
@@ -923,18 +1116,20 @@
   }
 
   // nsaBands: only when the NSA list must differ from the SA one (the router's two default lists)
+  // Returns "ok" (saved for the mode in use), "partial" (saved for 5G SA only), "unverified"
+  // (sent, but the lock lists could not be read back) or "failed".
   async function send_nr_bands(bands, label, nsaBands) {
     toast(label + "…", "info");
     var sa = await nr_lock_apply("sa", bands);
     if (!sa.ok) {
       toast(label + " failed" + (sa.error ? " (" + sa.error + ")" : ""), "error");
-      return false;
+      return "failed";
     }
     var nsa = await nr_lock_apply("nsa", nsaBands || bands);
     poll_once();
     if (!sa.checked) {
       toast(label + " sent, but the panel could not confirm it was saved.", "warn");
-      return true;
+      return "unverified";
     }
     var nsaChecked = nsa.ok && nsa.checked;
     var saSaved = sa.sa || (nsaChecked && nsa.sa);
@@ -942,12 +1137,14 @@
     var onNsa = net_flags(S.net.network_type).is_nsa;
     if (onNsa ? nsaSaved : saSaved) {
       toast(label + " ✓\nIf the router stays on the old band, switch network mode once.", "ok");
-    } else if (saSaved) {
-      toast(label + " was saved for 5G SA only.\nOn 5G NSA this router may not apply it.", "warn");
-    } else {
-      toast("The router did not save the 5G band lock.", "error");
+      return "ok";
     }
-    return true;
+    if (saSaved) {
+      toast(label + " was saved for 5G SA only.\nOn 5G NSA this router may not apply it.", "warn");
+      return "partial";
+    }
+    toast("The router did not save the 5G band lock.", "error");
+    return "failed";
   }
 
   // Developer tool: try several nr5g_type values and report which one changes a stored lock list.
@@ -956,8 +1153,9 @@
     var inp = prompt(
       "🧪 Probe 5G NSA band lock\n\n" +
         "Sends the band lock with different nr5g_type values (" + CFG.nr_type_variants.join(", ") + ")\n" +
-        "and checks which one the router stores. Each try really sets the lock,\n" +
-        "so pick bands you're happy to stay on (or use 'Remove NR Band Lock' afterwards).\n\n" +
+        "and checks which one the router stores. Each try really sets the lock.\n" +
+        "The current 5G lock lists are saved first, and the results window has a\n" +
+        "button to put them back.\n\n" +
         "Bands to lock (e.g. 78 or 78+28):",
       def,
     );
@@ -967,6 +1165,10 @@
     var want = band_set(bands.join(","));
     var results = [];
     var winner = null;
+    // Snapshot of the lock lists before anything is written, for "Restore original"
+    var snap = nr_lock_fields((await fresh_netinfo()) || {});
+    var snapSa = parse_band_input(snap.nr5g_sa_band_lock || "");
+    var snapNsa = parse_band_input(snap.nr5g_nsa_band_lock || "");
     toast("Probing " + CFG.nr_type_variants.length + " variants…", "info");
     for (var i = 0; i < CFG.nr_type_variants.length; i++) {
       var type = CFG.nr_type_variants[i];
@@ -997,10 +1199,21 @@
         : "<b>No variant stored a separate NSA lock field.</b> Either the router keeps one shared 5G lock (check whether your NR band changes after toggling network mode), " +
           "or NSA uses a different method — try 🔎 Find band-lock API and send me the result.") +
       "</div>" +
+      '<div class="zte_sec" style="font-size:11px;"><b>Before the probe:</b> ' +
+      (snapSa ? "SA n" + esc(snapSa.join(",n")) + (snapNsa ? " · NSA n" + esc(snapNsa.join(",n")) : "") : "could not be read") +
+      "</div>" +
+      (snapSa ? '<button class="zte_btn warn" id="zte_probe_restore" style="width:100%;margin-bottom:6px;">↩ Restore the original 5G band lock</button>' : "") +
       '<button class="zte_btn ok" id="zte_probe_copy" style="width:100%;">📋 Copy results</button>';
-    if (winner) { try { localStorage.setItem(NSA_TYPE_KEY, winner); } catch (e) {} }
+    if (winner) { try { localStorage.setItem(LS.NSA_TYPE, winner); } catch (e) { /* ignore */ } }
     var ov = show_modal("Probe 5G NSA lock", html);
-    ov.querySelector("#zte_probe_copy").onclick = function () { copy_text(JSON.stringify(results, null, 2), "Probe results copied"); };
+    ov.querySelector("#zte_probe_copy").onclick = function () { copy_text(JSON.stringify({ before: snap, results: results }, null, 2), "Probe results copied"); };
+    var rb = ov.querySelector("#zte_probe_restore");
+    if (rb) rb.onclick = async function () {
+      rb.disabled = true;
+      var res = await send_nr_bands(snapSa, "Original 5G band lock restored", snapNsa || snapSa);
+      rb.textContent = res === "ok" || res === "partial" ? "✓ Original lock restored" : "↩ Restore again";
+      rb.disabled = res === "ok";
+    };
     poll_once();
   };
 
@@ -1166,90 +1379,126 @@
   function numish(v) {
     return v !== "" && v !== null && v !== undefined && !isNaN(v) ? Number(v) : v;
   }
-  async function set_wwan(cur, enable) {
+  async function set_wwan(cur, enable, retries) {
     var body = { cid: 1, connect_mode: numish(cur.connect_mode), roam_enable: numish(cur.roam_enable), enable: enable };
     if (!enable) body.connect_status = "disconnected";
     console.log("[ZTE] set_wwaniface →", JSON.stringify(body));
-    var r = await ubusRetry({ service: "zwrt_data", method: "set_wwaniface", params: body });
+    if (S.poll_inflight) { try { await S.poll_inflight; } catch (e) { /* the write still has to go out */ } }
+    var r = await ubusRetry({ service: "zwrt_data", method: "set_wwaniface", params: body }, null, retries);
     return r;
   }
   function wwan_up(st) { return !!st && /^(connected|ipv4|ipv6)/i.test(String(st.connect_status || "")); }
-  // On some firmware (seen on an MC7530) turning mobile data OFF also drops the WEB session, so
+  // On some firmware (seen on an MC7530) the web session can end while mobile data is switched, so
   // the "turn it back ON" step can be lost — the page reloads (auto-login / self-heal) before it
   // runs, leaving data off. A marker survives that reload: reconnect_resume_if_pending() (called
-  // from start_panel) finishes the reconnect with the fresh session. Any normal completion of the
-  // reconnect clears the marker, so it only persists when the reconnect was actually interrupted.
-  var RECONNECT_KEY = "ZtePanelReconnectPending"; // localStorage JSON { at, connect_mode, roam_enable, tries }
+  // from start_panel and when a lost session comes back) finishes the reconnect with the fresh
+  // session. The marker is cleared only once the connection is actually up again.
   var RECONNECT_MAX_TRIES = 4;   // how many login-resumes before giving up
   var RECONNECT_MAX_AGE = 600000; // 10 min
-  function reconnect_mark(cur) { try { localStorage.setItem(RECONNECT_KEY, JSON.stringify({ at: Date.now(), connect_mode: cur.connect_mode, roam_enable: cur.roam_enable, tries: 0 })); } catch (e) { /* ignore */ } }
-  function reconnect_get() { try { return JSON.parse(localStorage.getItem(RECONNECT_KEY) || "null"); } catch (e) { return null; } }
-  function reconnect_clear() { try { localStorage.removeItem(RECONNECT_KEY); } catch (e) { /* ignore */ } }
+  function reconnect_mark(cur) { try { localStorage.setItem(LS.RECONNECT, JSON.stringify({ at: Date.now(), connect_mode: cur.connect_mode, roam_enable: cur.roam_enable, tries: 0 })); } catch (e) { /* ignore */ } }
+  function reconnect_get() { return lsGetJson(LS.RECONNECT, RECONNECT_MAX_AGE, "at"); }
+  function reconnect_clear() { try { localStorage.removeItem(LS.RECONNECT); } catch (e) { /* ignore */ } }
 
-  // Turn mobile data back on and clear the marker ONLY once that has gone through. If the ON is
-  // refused or never answered (after a data change the MC7530 stops answering for a while and then
-  // ends the web session), the marker is KEPT so the auto-login resume finishes it after the reload.
+  // Turn mobile data back on. The marker is cleared ONLY when the connection is up; if the ON is
+  // refused or never answered (the session may end around a data change), the marker is KEPT so
+  // the auto-login resume finishes it after the reload. A refused ON is not retried inside each try.
+  // S.reconnect_alive tells the caller whether the session was still there when it handed over.
   async function reconnect_turn_on(cur, where) {
     var on = null;
+    S.reconnect_alive = false;
     for (var i = 0; i < 3 && !(on && on.success); i++) {
-      on = await set_wwan(cur, 1);
+      on = await set_wwan(cur, 1, 1);
+      if (on && on.accessDenied) break; // the session may be gone — checked below
       if (!(on && on.success)) await sleep(1500);
     }
-    if (!(on && on.success)) { return false; }
-    reconnect_clear(); // ON accepted — data is coming on, nothing left to resume
+    if (!(on && on.success)) {
+      // A refused or unanswered ON does not always mean the session ended. Seen on a G5TC: an ON that
+      // timed out still took effect, and the next one was refused while the session stayed valid.
+      var alive = false;
+      try { alive = await check_login(); } catch (e) { alive = false; }
+      if (alive) {
+        var now = await get_wwan();
+        if (wwan_up(now)) {
+          reconnect_clear();
+          toast("Reconnected ✓ (" + now.connect_status + ")", "ok");
+          poll_once();
+          return true;
+        }
+        await sleep(3000);
+        on = await set_wwan(cur, 1, 1);
+      }
+      if (!(on && on.success)) {
+        S.reconnect_alive = alive;
+        return false;
+      }
+    }
     for (var k = 0; k < 12; k++) {
       await sleep(2000);
       var st = await get_wwan();
-      if (wwan_up(st)) { toast("Reconnected ✓ (" + st.connect_status + ")", "ok"); poll_once(); return true; }
+      if (wwan_up(st)) { reconnect_clear(); toast("Reconnected ✓ (" + st.connect_status + ")", "ok"); poll_once(); return true; }
     }
-    toast("Mobile data is on — waiting for the connection…", "warn"); return true;
+    toast("Mobile data is on — waiting for the connection…", "warn"); return true; // marker stays: the next login checks again
   }
 
   window.zte_wan_reconnect = async function () {
-    var cur = await get_wwan();
-    if (!cur || cur.connect_mode === undefined || cur.roam_enable === undefined) {
-      toast("Could not read the mobile-data settings (zwrt_data get_wwaniface) — not touching anything.", "error");
-      console.log("[ZTE] get_wwaniface returned:", cur);
-      return;
-    }
-    if (!confirm("Reconnect mobile data?\n\nTurns mobile data OFF and back ON (not a reboot).\n" +
-      "Connection returns in about 10–30 s. On some routers the web page logs you out while it does\n" +
-      "this — if a password is saved the panel logs in again and finishes by itself.\n\n" +
-      "Current: connect_status=" + (cur.connect_status || "?") + ", connect_mode=" + cur.connect_mode + ", roaming=" + cur.roam_enable))
-      return;
-    reconnect_mark(cur); // survives a reload, so the "turn back on" step is never lost
-    var off = await set_wwan(cur, 0);
-    if (!off.success) {
-      reconnect_clear(); // nothing changed — data is still on
-      toast(off.accessDenied ? denied_msg("mobile data on/off", "wwaniface") : "Data OFF failed (" + (off.error || "?") + ")", "error");
-      return;
-    }
-    toast("Mobile data off — reconnecting…", "warn", 9000);
-    await sleep(4000); // let the disconnect settle (fast on most firmware)
-    if (await reconnect_turn_on(cur, "reconnect")) return; // G5TC / MC8532B finish here
-    // The ON did not go through: the router dropped the session with the data (MC7530). The marker
-    // is kept — the page reloads (self-heal), logs in again, and the resume turns data back on.
-    toast("The router ended the session while reconnecting.\nThe panel logs in again and turns mobile data back on by itself.", "warn", 12000);
+    if (!op_start("reconnect")) return;
+    try {
+      var cur = await get_wwan();
+      if (!cur || cur.connect_mode === undefined || cur.roam_enable === undefined) {
+        toast("Could not read the mobile-data settings (zwrt_data get_wwaniface) — not touching anything.", "error");
+        console.log("[ZTE] get_wwaniface returned:", cur);
+        return;
+      }
+      if (!confirm("Reconnect mobile data?\n\nTurns mobile data OFF and back ON (not a reboot).\n" +
+        "Connection returns in about 10–30 s. On some routers the web page logs you out while it does\n" +
+        "this — if a password is saved the panel logs in again and finishes by itself.\n\n" +
+        "Current: connect_status=" + (cur.connect_status || "?") + ", connect_mode=" + cur.connect_mode + ", roaming=" + cur.roam_enable))
+        return;
+      reconnect_mark(cur); // survives a reload, so the "turn back on" step is never lost
+      var off = await set_wwan(cur, 0);
+      if (!off.success) {
+        reconnect_clear(); // nothing changed — data is still on
+        toast(off.accessDenied ? denied_msg("mobile data on/off", "wwaniface") : "Data OFF failed (" + (off.error || "?") + ")", "error");
+        return;
+      }
+      toast("Mobile data off — reconnecting…", "warn", 9000);
+      await sleep(CFG.reconnectOffWaitMs); // let the disconnect settle (fast on most firmware)
+      if (await reconnect_turn_on(cur, "reconnect")) return; // MC8532B (and others) finish here
+      if (S.reconnect_alive) {
+        // Still logged in, but the router would not turn data back on yet: try again in-page shortly
+        // (no reload needed). The resume counts its tries and gives up after RECONNECT_MAX_TRIES.
+        toast("The router did not turn mobile data back on yet.\nThe panel tries again in 30 s.", "warn", 12000);
+        setTimeout(reconnect_resume_if_pending, 30000);
+      } else {
+        toast("The router ended the session while reconnecting.\nThe panel logs in again and turns mobile data back on by itself.", "warn", 12000);
+      }
+    } finally { op_end("reconnect"); }
   };
 
-  // Called from start_panel (after a reload / automatic login) and from wait_for_session (when a
-  // lost session comes back without a reload). If a reconnect was interrupted, turn mobile data
-  // back on now. This is what makes the MC7530 case recover without the user touching the switch.
+  // Called from start_panel (after a reload / automatic login) and when a lost session comes back
+  // without a reload. If a reconnect was interrupted, check the live state first: if data is already
+  // up, just close the job; otherwise turn mobile data back on now.
   async function reconnect_resume_if_pending() {
-    if (S.reconnect_running || S.reconnect_resuming) return;
-    var st = reconnect_get();
+    if (S.op === "reconnect") return;
+    var st = reconnect_get(); // also drops a marker older than RECONNECT_MAX_AGE
     if (!st) return;
-    if (Date.now() - (st.at || 0) > RECONNECT_MAX_AGE) { reconnect_clear(); return; }
     if ((st.tries || 0) >= RECONNECT_MAX_TRIES) { reconnect_clear(); toast("Could not finish the reconnect — turn mobile data on in the router's own page.", "warn", 10000); return; }
-    st.tries = (st.tries || 0) + 1; try { localStorage.setItem(RECONNECT_KEY, JSON.stringify(st)); } catch (e) {}
-    S.reconnect_resuming = true;
+    var live = await get_wwan();
+    if (wwan_up(live)) { reconnect_clear(); toast("Mobile data is back — reconnect finished ✓", "ok"); return; }
+    if (!op_start("reconnect")) return;
+    // Counted BEFORE the attempt (as in 1.37), so attempts cut short by a reload still count.
+    st.tries = (st.tries || 0) + 1; try { localStorage.setItem(LS.RECONNECT, JSON.stringify(st)); } catch (e) { /* ignore */ }
+    var cur = {
+      connect_mode: live && live.connect_mode !== undefined ? live.connect_mode : st.connect_mode,
+      roam_enable: live && live.roam_enable !== undefined ? live.roam_enable : st.roam_enable,
+    };
     try {
       toast("Finishing the mobile-data reconnect — turning data back on…", "info", 7000);
-      await reconnect_turn_on({ connect_mode: st.connect_mode, roam_enable: st.roam_enable }, "resume");
+      await reconnect_turn_on(cur, "resume");
     } catch (e) {
-      // marker stays (unless ON cleared it); the next login tries again
+      // marker stays; the next login tries again
     } finally {
-      S.reconnect_resuming = false;
+      op_end("reconnect");
     }
   }
 
@@ -1289,7 +1538,11 @@
       // no band field: PCI,(E)ARFCN,RSRP,RSRQ[,SINR] — work the band out from the channel
       o.pci = p[0]; o.earfcn = p[1]; o.rsrp = p[2]; o.rsrq = p[3]; o.sinr = p[4];
       var cv = type === "NR" ? nr_arfcn_to_mhz(+p[1]) : lte_earfcn_to_mhz(+p[1]);
-      if (cv) o.band = (type === "NR" ? "n" : "B") + cv.band;
+      if (cv) {
+        var pre = type === "NR" ? "n" : "B";
+        if (cv.band != null) o.band = pre + cv.band;
+        else if (cv.bands && cv.bands.length) o.band = cv.bands.map(function (b) { return pre + b; }).join("/");
+      }
     }
     return o;
   }
@@ -1398,12 +1651,11 @@
   }
 
   window.zte_nbr_scan = async function () {
-    if (S.nbr_running) { toast("Scan already running…", "warn"); return; }
+    if (S.op === "scan") { toast("Scan already running…", "warn"); return; }
     if (!confirm("Neighbor cell scan\n\nUses the router's built-in scan.\n" +
       "⚠️ Mobile data is disconnected while it scans (about 30 s). The panel turns it back on afterwards.\n\nContinue?"))
       return;
-    S.nbr_running = true;
-    S.pause_poll = true; // keep the router quiet while its modem is busy
+    if (!op_start("scan")) return;
     S.nbr = [];
     S.nbr_raw = null;
     ztoggle("zte_scan_panel", true);
@@ -1418,7 +1670,7 @@
       }
       started = true;
       render_nbr("Scanning… (mobile data is off during the scan)");
-      await sleep(6000);
+      await sleep(CFG.scanSettleMs);
       var last = "", stable = 0, loggedOut = false;
       for (var i = 1; i <= 9; i++) {
         var res = await ubusRetry([
@@ -1439,7 +1691,7 @@
         }
         render_nbr("Scanning… " + S.nbr.length + " cell(s) so far");
         if (stable >= 3) break;
-        await sleep(3000);
+        await sleep(CFG.scanPollMs);
       }
       var nl = S.nbr.filter(function (c) { return c.type === "LTE"; }).length;
       summary = loggedOut
@@ -1455,8 +1707,7 @@
         try { await restore_data_after_scan(before); } catch (e) { /* ignore */ }
         render_nbr(summary);
       }
-      S.pause_poll = false;
-      S.nbr_running = false;
+      op_end("scan");
     }
   };
 
@@ -1472,29 +1723,78 @@
       await window.zte_guided_lte_lock(pci, ch); // staged LTE-Only → lock → restore (its own confirm)
     } else {
       var conv = nr_arfcn_to_mhz(ch);
-      var band = strip_n(c.band) || (conv ? String(conv.band) : "");
-      band = prompt("Lock 5G cell PCI " + pci + ", ARFCN " + ch + "\n\nConfirm the band number:\n" +
+      var band = strip_n(c.band) || (conv && conv.band != null ? String(conv.band) : "");
+      band = prompt("Lock 5G cell PCI " + pci + ", ARFCN " + ch + "\n\nConfirm the band number" +
+        (conv && conv.bands.length > 1 ? " (this channel can be n" + conv.bands.join(" or n") + ")" : "") + ":\n" +
         "⚠️ If this cell belongs to another operator the router will have no service until you unlock.", band);
-      if (!band || isNaN(strip_n(band))) return;
-      band = strip_n(band);
-      if (await run_action("5G cell lock " + pci + "," + ch + "," + band, function () { return nr_cell_call(pci, ch, band); }))
-        toast("5G cell lock set." + APPLY_HINT, "info");
+      if (!band) return;
+      var chk = check_nr_cell(pci, ch, band);
+      if (chk.error) { toast("5G cell lock: " + chk.error, "error", 9000); return; }
+      await nr_cell_apply(chk.pci, chk.arfcn, chk.band);
     }
   };
 
   // ── DNS (zwrt_router.api router_get_dns_para / router_set_wan_dns) ──
+  // IPv6 as the router's own web UI does it (service_rpc.js): router_set_wan_dns also takes
+  // ipv6_prefer_dns_manual / ipv6_standby_dns_manual in manual mode, sent only when filled in, and
+  // the UI reads them back from uci zwrt_router "dns" as ipv6_wan_prefer_dns_manual / …standby….
   function dnsf(d, k) {
     if (!d) return undefined;
     return d[k] !== undefined ? d[k] : d["wan_" + k];
   }
+  function dns6(d, which) { // which: "prefer" | "standby"
+    if (!d) return undefined;
+    var a = d["ipv6_" + which + "_dns_manual"];
+    return a !== undefined ? a : d["ipv6_wan_" + which + "_dns_manual"];
+  }
+  // Expand an IPv6 address to 8 lowercase groups without leading zeros, for comparing; null if invalid.
+  function norm6(s) {
+    s = String(s || "").trim().toLowerCase();
+    if (!/^[0-9a-f:.]+$/.test(s) || s.indexOf(":") < 0) return null;
+    var v4 = s.match(/(\d+\.\d+\.\d+\.\d+)$/); // ::ffff:1.2.3.4 style tail
+    if (v4) {
+      var o = v4[1].split(".").map(Number);
+      if (o.some(function (x) { return x > 255; })) return null;
+      s = s.slice(0, -v4[1].length) + ((o[0] << 8) | o[1]).toString(16) + ":" + ((o[2] << 8) | o[3]).toString(16);
+    }
+    var parts = s.split("::");
+    if (parts.length > 2) return null;
+    var head = parts[0] ? parts[0].split(":") : [], tail = parts.length === 2 && parts[1] ? parts[1].split(":") : [];
+    var fill = 8 - head.length - tail.length;
+    if (parts.length === 2 ? fill < 1 : fill !== 0) return null;
+    var g = head.concat(new Array(parts.length === 2 ? fill : 0).fill("0"), tail);
+    if (g.length !== 8 || g.some(function (x) { return !/^[0-9a-f]{1,4}$/.test(x); })) return null;
+    return g.map(function (x) { return parseInt(x, 16).toString(16); }).join(":");
+  }
   async function get_dns() {
-    var r = await ubusRetry({ service: "zwrt_router.api", method: "router_get_dns_para" }, { quiet: true });
-    return r.success ? r.data || {} : null;
+    var r = await ubusRetry([
+      { service: "zwrt_router.api", method: "router_get_dns_para" },
+      { service: "uci", method: "get", params: { config: "zwrt_router", section: "dns" } },
+    ], { quiet: true });
+    var d = r[0].success ? r[0].data || {} : null;
+    var u = r[1].success && r[1].data ? r[1].data.values || r[1].data : null;
+    if (!d && !u) return null;
+    d = d || {};
+    if (u) { // fill in what router_get_dns_para does not report (on some firmware: the IPv6 fields)
+      var map = { dns_mode: "wan_dns_mode", prefer_dns_manual: "wan_prefer_dns_manual", standby_dns_manual: "wan_standby_dns_manual",
+        ipv6_prefer_dns_manual: "ipv6_wan_prefer_dns_manual", ipv6_standby_dns_manual: "ipv6_wan_standby_dns_manual" };
+      Object.keys(map).forEach(function (k) {
+        var have = /^ipv6_/.test(k) ? dns6(d, k.split("_")[1]) : dnsf(d, k);
+        if (have === undefined && u[map[k]] !== undefined) d[k] = u[map[k]];
+      });
+    }
+    return d;
   }
   // Try unprefixed keys first, then the firmware's wan_-prefixed keys; verify by reading back.
-  async function set_dns(mode, p1, p2) {
+  // v6a / v6b: an address = set it, "" = clear the stored value, undefined/null = leave it as it is.
+  async function set_dns(mode, p1, p2, v6a, v6b) {
     var plain = { dns_mode: mode, prefer_dns_manual: p1 || "", standby_dns_manual: p2 || "" };
     var prefixed = { wan_dns_mode: mode, wan_prefer_dns_manual: p1 || "", wan_standby_dns_manual: p2 || "" };
+    function given(v) { return v !== undefined && v !== null; }
+    if (mode === "manual") { // like the router's own UI: IPv6 fields only when filled in (or cleared on purpose)
+      if (given(v6a)) { plain.ipv6_prefer_dns_manual = v6a; prefixed.ipv6_wan_prefer_dns_manual = v6a; }
+      if (given(v6b)) { plain.ipv6_standby_dns_manual = v6b; prefixed.ipv6_wan_standby_dns_manual = v6b; }
+    }
     var tries = [plain, prefixed];
     for (var i = 0; i < tries.length; i++) {
       console.log("[ZTE] router_set_wan_dns →", JSON.stringify(tries[i]));
@@ -1502,8 +1802,30 @@
       if (r.accessDenied) return { ok: false, msg: denied_msg("DNS changes", "dns") };
       await sleep(1200);
       var d = await get_dns();
-      if (d && dnsf(d, "dns_mode") === mode && (mode !== "manual" || dnsf(d, "prefer_dns_manual") === p1))
-        return { ok: true, msg: "DNS set to " + (mode === "manual" ? p1 + (p2 ? ", " + p2 : "") : "automatic (operator)") };
+      if (!d || dnsf(d, "dns_mode") !== mode) continue;
+      if (mode !== "manual") return { ok: true, msg: "DNS set to automatic (operator)" };
+      if (dnsf(d, "prefer_dns_manual") !== p1 || (p2 && dnsf(d, "standby_dns_manual") !== p2)) continue;
+      // IPv6: confirm when the router reports it back; some firmware does not
+      var v6read = dns6(d, "prefer") !== undefined || dns6(d, "standby") !== undefined;
+      function v6match(want, have) {
+        if (!given(want)) return true;
+        if (want === "") return !have; // cleared: empty or no longer reported
+        return norm6(have) === norm6(want);
+      }
+      var v6ok = v6match(v6a, dns6(d, "prefer")) && v6match(v6b, dns6(d, "standby"));
+      var v6sent = given(v6a) || given(v6b);
+      if (v6sent && v6read && !v6ok) continue;
+      var msg = "DNS set to " + p1 + (p2 ? ", " + p2 : "");
+      if (v6sent) {
+        var parts6 = [];
+        if (v6a) parts6.push(v6a);
+        if (v6b) parts6.push(v6b);
+        var cleared = (v6a === "" ? 1 : 0) + (v6b === "" ? 1 : 0);
+        msg += " · IPv6 " + (parts6.length ? parts6.join(", ") : "") +
+          (cleared ? (parts6.length ? ", " : "") + (cleared === 2 ? "cleared" : (v6a === "" ? "primary" : "secondary") + " cleared") : "") +
+          (v6read ? "" : " (sent; this router does not report IPv6 DNS back)");
+      }
+      return { ok: true, msg: msg };
     }
     return { ok: false, msg: "The router did not apply the DNS change — see the console for details." };
   }
@@ -1526,9 +1848,20 @@
       var p = inp.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
       var ipRe = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
       if (!p.length || p.length > 2 || !p.every(function (x) { return ipRe.test(x); })) { toast("Invalid IPv4 address(es)", "error"); return; }
+      var def6 = [dns6(d, "prefer"), dns6(d, "standby")].filter(Boolean).join(",");
+      var inp6 = prompt("IPv6 DNS (optional) — primary,secondary\ne.g. 2606:4700:4700::1111,2001:4860:4860::8888\n" +
+        "Keep the values shown to keep them. Empty or - = no IPv6 DNS; - clears one slot (e.g. 2606:4700:4700::1111,- ).", def6);
+      if (inp6 === null) return; // Cancel = do nothing
+      var q = inp6.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+      if (q.length > 2 || !q.every(function (x) { return x === "-" || norm6(x) !== null; })) { toast("Invalid IPv6 address(es)", "error"); return; }
+      // Empty or a single "-" clears both. Sent explicitly: some firmware (G5TC) clears IPv6 DNS when the
+      // keys are missing and others may keep it, so an explicit "" behaves the same everywhere.
+      if (!q.length || (q.length === 1 && q[0] === "-")) q = ["-", "-"];
+      else if (q.length === 1) q.push("-"); // one address = primary only, no secondary
+      q = q.map(function (x) { return x === "-" ? "" : x; });
       ov.remove();
-      var res = await set_dns("manual", p[0], p[1]);
-      toast(res.msg, res.ok ? "ok" : "error");
+      var res = await set_dns("manual", p[0], p[1], q[0], q[1]);
+      toast(res.msg, res.ok ? "ok" : "error", res.ok ? 7000 : undefined);
     };
     ov.querySelector("#zte_dns_auto").onclick = async function () {
       ov.remove();
@@ -2598,6 +2931,39 @@
   }
   var APPLY_HINT = "\nToggle network mode or reboot the router to apply.";
 
+  // Send a 5G cell lock (0,0,0 = remove), then read lock_nr_cell back.
+  // "Command accepted" (the router answered OK) and "stored" (the read-back holds these values)
+  // are reported separately. Whether the router actually camps on the cell is only known after
+  // a mode toggle or reboot. Returns "ok", "unverified", "mismatch" or "failed".
+  async function nr_cell_apply(pci, arfcn, band) {
+    var unlock = +pci === 0 && +arfcn === 0 && +band === 0;
+    var label = unlock ? "5G cell unlock" : "5G cell lock " + pci + "," + arfcn + ",n" + band;
+    var r;
+    try { r = await nr_cell_call(pci, arfcn, band); } catch (e) { r = { success: false, error: e.message }; }
+    if (!r || !r.success) {
+      toast(label + " failed" + (r && r.error ? " (" + r.error + ")" : ""), "error");
+      poll_once();
+      return "failed";
+    }
+    toast(label + " — command accepted. Checking what the router stored…", "info");
+    await sleep(CFG.settleMs);
+    var d = await fresh_netinfo();
+    poll_once();
+    if (!d || d.lock_nr_cell === undefined) {
+      toast(label + " — command accepted, but the panel could not read the lock back." + APPLY_HINT, "warn", 10000);
+      return "unverified";
+    }
+    var stored = d.lock_nr_cell;
+    if (unlock ? nr_cell_unlocked(stored) : nr_cell_matches(stored, pci, arfcn, band)) {
+      toast(unlock ? "5G cell lock removed ✓ (stored)." + APPLY_HINT : label + " ✓ stored by the router." + APPLY_HINT, "ok", 10000);
+      return "ok";
+    }
+    console.log("[ZTE] 5G cell lock read-back:", JSON.stringify(stored), "wanted", pci, arfcn, band);
+    toast(label + " — command accepted, but the router reports lock_nr_cell = \"" + (stored || "(empty)") + "\"." +
+      "\nThe lock may not be active.", "warn", 12000);
+    return "mismatch";
+  }
+
   window.zte_lte_cell_lock = async function (reset) {
     if (reset) {
       var cur = S.net.lock_lte_cell;
@@ -2611,33 +2977,28 @@
     var inp = prompt("LTE cell lock — PCI,EARFCN (e.g. 116,3350)\nDefault = current cell", def);
     if (!inp) return;
     var p = inp.split(",").map(function (x) { return x.trim(); });
-    if (p.length !== 2 || p.some(function (x) { return x === "" || isNaN(x); })) {
-      toast("Invalid input — use PCI,EARFCN", "error");
-      return;
-    }
-    if (+p[0] < 0 || +p[0] > 503) { toast("PCI must be between 0 and 503", "error"); return; }
-    await window.zte_guided_lte_lock(p[0], p[1]); // staged LTE-Only → lock → restore (see GUIDED LTE CELL LOCK)
+    if (p.length !== 2) { toast("Invalid input — use PCI,EARFCN", "error"); return; }
+    var chk = check_lte_cell(p[0], p[1]);
+    if (chk.error) { toast("LTE cell lock: " + chk.error, "error", 9000); return; }
+    await window.zte_guided_lte_lock(chk.pci, chk.earfcn); // staged LTE-Only → lock → restore (see GUIDED LTE CELL LOCK)
   };
 
   window.zte_nr_cell_lock = async function (reset) {
     if (reset) {
       var cur = S.net.lock_nr_cell;
-      if (!cur || cur === "0,0,0") { toast("No 5G cell lock is active", "info"); return; }
+      if (nr_cell_unlocked(cur)) { toast("No 5G cell lock is active", "info"); return; }
       if (!confirm("Remove 5G cell lock (" + cur + ")?")) return;
-      if (await run_action("5G cell lock removed", function () { return nr_cell_call(0, 0, 0); }))
-        toast("5G cell lock removed." + APPLY_HINT, "info");
+      await nr_cell_apply(0, 0, 0);
       return;
     }
     var def = (S.net.nr5g_pci || "") + "," + (S.net.nr5g_action_channel || "") + "," + strip_n(S.net.nr5g_action_band);
     var inp = prompt("5G cell lock — PCI,ARFCN,BAND (e.g. 202,639936,78)\nDefault = current cell", def);
     if (!inp) return;
-    var p = inp.split(",").map(function (x) { return strip_n(x); });
-    if (p.length !== 3 || p.some(function (x) { return x === "" || isNaN(x); })) {
-      toast("Invalid input — use PCI,ARFCN,BAND", "error");
-      return;
-    }
-    if (await run_action("5G cell lock " + p.join(","), function () { return nr_cell_call(p[0], p[1], p[2]); }))
-      toast("5G cell lock set." + APPLY_HINT, "info");
+    var p = inp.split(",").map(function (x) { return x.trim(); });
+    if (p.length !== 3) { toast("Invalid input — use PCI,ARFCN,BAND", "error"); return; }
+    var chk = check_nr_cell(p[0], p[1], p[2]);
+    if (chk.error) { toast("5G cell lock: " + chk.error, "error", 9000); return; }
+    await nr_cell_apply(chk.pci, chk.arfcn, chk.band);
   };
 
   // ─────────────────────────────────────────────
@@ -2648,15 +3009,14 @@
   //  session, the auto-login recovery reloads the page and the routine resumes where it stopped.
   //  LTE cells only (5G cell locks stay direct).
   // ─────────────────────────────────────────────
-  var GLOCK_KEY = "ZtePanelGuidedLock"; // localStorage JSON { phase, pci, earfcn, prevMode, startedAt, resumes }
   var GLOCK_MAX_RESUMES = 5;            // give up after this many reload-resumes
   var GLOCK_MAX_AGE = 240000;           // ms; abandon a routine older than this
-  var GLOCK_STEP_WAIT = 20000;          // ms budget to wait for a mode/attach change
-  var GLOCK_STEP_POLL = 1500;           // ms between state polls while waiting
+  var GLOCK_STEP_WAIT = CFG.modeWaitMs; // ms budget to wait for a mode/attach change
+  var GLOCK_STEP_POLL = CFG.modePollMs; // ms between state polls while waiting
 
-  function glock_get() { try { return JSON.parse(localStorage.getItem(GLOCK_KEY) || "null"); } catch (e) { return null; } }
-  function glock_set(st) { try { localStorage.setItem(GLOCK_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ } }
-  function glock_clear() { try { localStorage.removeItem(GLOCK_KEY); } catch (e) { /* ignore */ } }
+  function glock_get() { return lsGetJson(LS.GLOCK, GLOCK_MAX_AGE, "startedAt"); }
+  function glock_set(st) { try { localStorage.setItem(LS.GLOCK, JSON.stringify(st)); } catch (e) { /* ignore */ } }
+  function glock_clear() { try { localStorage.removeItem(LS.GLOCK); } catch (e) { /* ignore */ } }
 
   // Poll the router until pred(S.net) holds or the budget runs out. Returns true if it held.
   async function glock_wait(pred, budget) {
@@ -2671,8 +3031,11 @@
 
   // One ubus setter for the routine. Throws when the session is gone, so the caller can recover.
   async function glock_call(desc, callObj) {
-    var r = await ubusRetry(callObj); // throws on a network/abort failure (a hard drop)
+    var r = await ubusRetry(callObj);
+    // ubus() no longer throws; a refusal (access denied) or no answer at all is treated as a drop,
+    // so the routine goes through its recovery (check login → reload → resume) as before.
     if (r && r.accessDenied) throw new Error("session lost at " + desc);
+    if (r && r.network) throw new Error("no answer at " + desc + " (" + r.error + ")");
     return !!(r && r.success);
   }
   function glock_set_mode(mode) {
@@ -2682,14 +3045,15 @@
   // Public entry point (main LTE Lock button and the scan's per-LTE-cell Lock buttons both call it).
   window.zte_guided_lte_lock = async function (pci, earfcn) {
     var existing = glock_get();
-    if (S.glock_running || (existing && Date.now() - existing.startedAt < GLOCK_MAX_AGE)) {
+    if (S.op === "glock" || (existing && Date.now() - existing.startedAt < GLOCK_MAX_AGE)) {
       toast("A guided LTE lock is already in progress.", "warn"); return;
     }
     if (existing) glock_clear(); // a stale, abandoned routine — replace it
-    pci = String(pci).trim(); earfcn = String(earfcn).trim();
-    if (pci === "" || isNaN(pci) || earfcn === "" || isNaN(earfcn)) { toast("Guided lock: invalid PCI/EARFCN", "error"); return; }
-    if (+pci < 0 || +pci > 503) { toast("PCI must be between 0 and 503", "error"); return; }
-    var prev = S.net.net_select || "LTE_AND_5G";
+    var chk = check_lte_cell(pci, earfcn);
+    if (chk.error) { toast("Guided lock: " + chk.error, "error", 9000); return; }
+    pci = chk.pci; earfcn = chk.earfcn;
+    var orig = S.net.net_select || "";
+    var prev = orig || "LTE_AND_5G";
     if (prev === "Only_LTE") prev = "LTE_AND_5G"; // already on LTE-Only: restore to 5G NSA afterwards
     if (!confirm(
       "Guided LTE cell lock — PCI " + pci + ", EARFCN " + earfcn + "\n\n" +
@@ -2697,28 +3061,49 @@
       "⚠️ Your connection may drop for ~10–20 s while the mode changes. If the router logs you out, the panel logs back in and finishes on its own.\n" +
       "⚠️ If this cell is not on your operator you will have no service until you unlock.\n\nContinue?"
     )) return;
-    glock_set({ phase: "to_lte", pci: pci, earfcn: earfcn, prevMode: prev, startedAt: Date.now(), resumes: 0 });
+    glock_set({ phase: "to_lte", pci: pci, earfcn: earfcn, prevMode: prev, origMode: orig, startedAt: Date.now(), resumes: 0 });
     await glock_run();
   };
 
   // The state machine. Runs the current phase, advances, persists; safe to re-enter to resume.
   async function glock_run() {
     var st = glock_get();
-    if (!st || S.glock_running) return;
+    if (!st || S.op === "glock") return;
     if (Date.now() - st.startedAt > GLOCK_MAX_AGE || (st.resumes || 0) > GLOCK_MAX_RESUMES) {
       toast("Guided lock: giving up — restoring " + (NET_MODES[st.prevMode] || st.prevMode) + "…", "warn", 10000);
       try { await glock_set_mode(st.prevMode); } catch (e) { /* ignore */ }
-      glock_clear(); S.pause_poll = false; return;
+      glock_clear(); op_end("glock"); return;
     }
-    S.glock_running = true;
-    S.pause_poll = true; // keep the main poll loop out of the routine's way
+    if (!op_start("glock")) return;
     try {
       if (st.phase === "to_lte") {
         toast("Guided lock 1/4 — switching to LTE-Only…", "info", 6000);
-        await glock_set_mode("Only_LTE");
-        await glock_wait(function (d) { return d.net_select === "Only_LTE"; }, GLOCK_STEP_WAIT);
-        await glock_wait(function (d) { return d.network_type === "LTE"; }, 8000); // let it camp on LTE
-        st.phase = "locking"; glock_set(st);
+        var accepted = await glock_set_mode("Only_LTE");
+        var onLte = await glock_wait(function (d) { return d.net_select === "Only_LTE"; }, GLOCK_STEP_WAIT);
+        if (!onLte) {
+          // A dropped session is not a refusal: let the recovery (re-login → resume) retry this phase.
+          if (!(await check_login())) throw new Error("session lost while switching to LTE-Only");
+          // The router is reachable but did not switch. Locking now (still in NSA) is exactly what
+          // this routine exists to avoid, so stop here and put the mode back.
+          st.phase = "abort";
+          st.reason = accepted ? "the router did not switch to LTE-Only" : "the router refused LTE-Only";
+          glock_set(st);
+        } else {
+          await glock_wait(function (d) { return d.network_type === "LTE"; }, 8000); // let it camp on LTE (Only_LTE already rules out ENDC)
+          st.phase = "locking"; glock_set(st);
+        }
+      }
+      if (st.phase === "abort") {
+        var back = st.origMode || st.prevMode;
+        toast("Guided lock stopped — " + (st.reason || "the router did not switch to LTE-Only") +
+          ". No cell lock was set. Restoring " + (NET_MODES[back] || back) + "…", "error", 10000);
+        await glock_set_mode(back);
+        var restored = await glock_wait(function (d) { return d.net_select === back; }, GLOCK_STEP_WAIT);
+        glock_clear();
+        toast(restored
+          ? "Guided lock cancelled — no cell lock was set. Network mode is back to " + (NET_MODES[back] || back) + "."
+          : "Guided lock cancelled — no cell lock was set. The router still reports " + (NET_MODES[S.net.net_select] || S.net.net_select || "?") +
+            "; set the network mode by hand if needed.", restored ? "warn" : "error", 14000);
       }
       if (st.phase === "locking") {
         toast("Guided lock 2/4 — locking LTE cell " + st.pci + "," + st.earfcn + "…", "info", 6000);
@@ -2733,7 +3118,7 @@
         toast("Guided lock 3/4 — returning to " + (NET_MODES[st.prevMode] || st.prevMode) + "…", "info", 6000);
         await glock_set_mode(st.prevMode);
         await glock_wait(function (d) {
-          return d.net_select === st.prevMode && (d.network_type === "ENDC" || d.network_type === "SA" || d.network_type === "LTE");
+          return d.net_select === st.prevMode && (d.network_type === "ENDC" || d.network_type === "LTE-NSA" || d.network_type === "SA" || d.network_type === "LTE");
         }, GLOCK_STEP_WAIT);
         st.phase = "verify"; glock_set(st);
       }
@@ -2753,7 +3138,7 @@
       if (cur) { cur.resumes = (cur.resumes || 0) + 1; glock_set(cur); }
       var alive = false;
       try { alive = await check_login(); } catch (_) { alive = false; }
-      S.glock_running = false;
+      op_end("glock");
       if (!alive) {
         toast("Guided lock — the router dropped the session. Re-logging in to finish…", "warn", 9000);
         setTimeout(function () { location.reload(); }, 1200); // auto-login recovers; start_panel resumes the routine
@@ -2763,14 +3148,13 @@
       }
       return;
     }
-    S.glock_running = false;
-    S.pause_poll = false;
+    op_end("glock");
   }
 
   // Called from start_panel: if a routine was interrupted by a session drop, finish it.
   function glock_resume_if_pending() {
-    if (!glock_get()) return;
     var st = glock_get();
+    if (!st || S.op === "glock") return; // nothing to resume, or the routine is already running in this page
     toast("Resuming guided LTE lock (" + st.pci + "," + st.earfcn + ")…", "info", 7000);
     glock_run();
   }
@@ -2837,13 +3221,24 @@
     if (old) old.remove();
     var ov = document.createElement("div");
     ov.id = "zte_modal";
+    ov.setAttribute("role", "dialog");
+    ov.setAttribute("aria-modal", "true");
     ov.innerHTML =
       '<div class="zte_modal_box">' +
-      '<div class="zte_modal_hdr"><span>' + esc(title) + '</span><button class="zte_icon_btn" id="zte_modal_x">×</button></div>' +
+      '<div class="zte_modal_hdr"><span>' + esc(title) + '</span><button class="zte_icon_btn" id="zte_modal_x" type="button" aria-label="Close">×</button></div>' +
       '<div class="zte_modal_body">' + html + "</div></div>";
     document.body.appendChild(ov);
-    ov.addEventListener("click", function (e) { if (e.target === ov) ov.remove(); });
-    zel("zte_modal_x").onclick = function () { ov.remove(); };
+    function close() {
+      ov.remove();
+      document.removeEventListener("keydown", onKey);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+    }
+    ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
+    zel("zte_modal_x").onclick = close;
+    document.addEventListener("keydown", onKey);
+    try { zel("zte_modal_x").focus(); } catch (e) { /* ignore */ }
     return ov;
   }
 
@@ -3007,11 +3402,10 @@
   //  from the UI's own modules (config/menu and config/<device>/menu_*).
   //  Nothing here talks to the router — it only changes what the page displays.
   // ─────────────────────────────────────────────
-  var HIDDEN_KEY = "ZtePanelHiddenMenus"; // localStorage: "1" = on
   var HIDDEN_SKIP = ["#login", "#home", "#change_password", "#privacy_policy", "#developer_options_login", "#check_license"];
 
   function hidden_on() {
-    try { return localStorage.getItem(HIDDEN_KEY) === "1"; } catch (e) { return false; }
+    try { return localStorage.getItem(LS.HIDDEN) === "1"; } catch (e) { return false; }
   }
 
   // The web UI's modules (require.js registry), or null on a page built differently
@@ -3112,14 +3506,25 @@
     b.textContent = on ? "👁 Hidden Menus: ON" : "👁 Hidden Menus: OFF";
   }
 
+  function hidden_watch_start() {
+    if (S.hidden_timer) return;
+    S.hidden_timer = setInterval(apply_hidden_menus, 2000);
+  }
+  function hidden_watch_stop() {
+    if (!S.hidden_timer) return;
+    clearInterval(S.hidden_timer);
+    S.hidden_timer = null;
+  }
   window.zte_hidden_toggle = function () {
     var on = !hidden_on();
-    try { if (on) localStorage.setItem(HIDDEN_KEY, "1"); else localStorage.removeItem(HIDDEN_KEY); } catch (e) { /* ignore */ }
+    try { if (on) localStorage.setItem(LS.HIDDEN, "1"); else localStorage.removeItem(LS.HIDDEN); } catch (e) { /* ignore */ }
     update_hidden_btn();
     if (on) {
+      hidden_watch_start();
       var n = apply_hidden_menus();
       toast("Hidden menus: ON" + (n ? " — " + n + " hidden item(s) shown on this page (dashed outline)" : " — nothing hidden on this page"), "ok");
     } else {
+      hidden_watch_stop();
       undo_hidden_menus();
       toast("Hidden menus: OFF", "info");
     }
@@ -3255,13 +3660,17 @@
 
   function start_hidden_menus() {
     update_hidden_btn();
-    // The web UI redraws its page on every address change, and its menu logic can hide entries again
+    // The web UI redraws its page on every address change, and its menu logic can hide entries again.
+    // The interval runs only while Hidden Menus is on.
     window.addEventListener("hashchange", function () {
+      if (!hidden_on()) return;
       setTimeout(apply_hidden_menus, 600);
       setTimeout(apply_hidden_menus, 1500);
     });
-    setInterval(apply_hidden_menus, 2000);
-    apply_hidden_menus();
+    if (hidden_on()) {
+      hidden_watch_start();
+      apply_hidden_menus();
+    }
   }
 
   // ─────────────────────────────────────────────
@@ -3317,14 +3726,32 @@
 
   // fastOnly = true reads just the fast group; without it everything is refreshed
   // (the first poll, every CFG.slowPollEvery-th poll, and after every action).
-  async function poll_once(fastOnly) {
+  // One batch at a time. A refresh requested while one is in flight is coalesced
+  // into a single follow-up (full if any caller asked for a full read).
+  function poll_once(fastOnly) {
+    if (S.poll_inflight) {
+      if (!fastOnly) S.poll_follow = "full";
+      else if (!S.poll_follow) S.poll_follow = "fast";
+      return S.poll_inflight;
+    }
+    S.poll_inflight = poll_once_now(fastOnly).finally(function () {
+      S.poll_inflight = null;
+      var follow = S.poll_follow;
+      S.poll_follow = null;
+      if (follow) return poll_once(follow === "fast");
+    });
+    return S.poll_inflight;
+  }
+  async function poll_once_now(fastOnly) {
+    var gen = (S.poll_gen = (S.poll_gen || 0) + 1);
     try {
       var res = await ubusRetry(fastOnly ? POLL_FAST : POLL_FAST.concat(POLL_SLOW), { quiet: true }, 2);
+      if (gen !== S.poll_gen) return; // a newer poll already owns the state
       if (res[0].success) S.net = res[0].data || {};
       if (res[1].success) S.traffic = res[1].data || {};
       if (!fastOnly) {
         if (res[2].success) S.thermal = res[2].data || {};
-        if (res[3].success) S.devinfo = res[3].data || {};
+        if (res[3].success) { S.devinfo = res[3].data || {}; note_router_boot(S.devinfo.device_uptime); }
         if (res[4].success) S.wan = res[4].data || {};
         var v;
         if ((v = uci_values(res[5])) && !S.ant_busy) { S.ant = v; S.ant_err = null; }
@@ -3343,7 +3770,7 @@
       }
       stamp(sessionStorage, SEEN_KEY);
       set_dot(res.every(function (r) { return r.success; }) ? "ok" : "warn");
-      update_ui();
+      schedule_ui();
     } catch (e) {
       set_dot("error");
     }
@@ -3358,12 +3785,9 @@
       await wait_page_settled();
       console.log("[ZTE] session is back — polling resumed");
       if (S.expired_warned) toast("Logged in again — panel resumed", "ok");
-      S.session_lost = false;
-      S.expired_warned = false;
+      resetSessionFlags();
       S.poll_tick = 0;
-      S.lost_checks = 0;
-      S.self_heal_tried = false;
-      reconnect_resume_if_pending(); // a reconnect that lost its session: finish it now
+      onSessionRestored(); // resume reconnect / guided lock if interrupted
       return;
     }
     S.lost_checks++;
@@ -3444,6 +3868,15 @@
     );
   }
 
+  var _ui_raf = 0;
+  function schedule_ui() {
+    if (_ui_raf) return;
+    _ui_raf = requestAnimationFrame(function () {
+      _ui_raf = 0;
+      update_ui();
+    });
+  }
+
   function update_ui() {
     var d = S.net;
     var f = net_flags(d.network_type);
@@ -3454,12 +3887,11 @@
 
     // ── Network ──
     var nt = d.network_type || "—";
-    zset("network_type", nt === "SA" ? "5G SA" : nt === "ENDC" ? "5G NSA (EN-DC)" : nt);
+    zset("network_type", f.is_sa ? "5G SA" : f.is_nsa ? "5G NSA" + (nt === "LTE-NSA" ? " (LTE-NSA)" : " (EN-DC)") : nt);
     zset("network_provider_fullname", d.network_provider_fullname || "—");
-    var nrSum = f.is_sa || f.is_nsa ? S.nr : [];
-    zset("__bandinfo", band_info(lte, nrSum) || "—");
+    zset("__bandinfo", band_info(lte, nr) || "—");
     var bw = 0;
-    lte.concat(nrSum).forEach(function (c) { if (c.bandwidth) bw += c.bandwidth; });
+    lte.concat(nr).forEach(function (c) { if (c.bandwidth) bw += c.bandwidth; });
     zset("zte_total_bw", bw ? bw + " MHz" : "—");
 
     ztoggle("lte_ca_active_tr", f.is_lte);
@@ -3477,14 +3909,14 @@
     if (enb) zhtml("zte_enodeb_val", esc(enb.node) + ' <span style="font-size:10px;color:#78909C;font-weight:400">(0x' +
       enb.node.toString(16).toUpperCase() + ") · sector " + enb.sector + "</span>");
     var gnb = split_cell_id(d.nr5g_cell_id);
-    ztoggle("zte_gnodeb_row", !!gnb && (f.is_sa || f.is_nsa));
+    ztoggle("zte_gnodeb_row", !!gnb && f.show_nr);
     if (gnb) zhtml("zte_gnodeb_val", esc(gnb.node) + ' <span style="font-size:10px;color:#78909C;font-weight:400">(0x' +
       gnb.node.toString(16).toUpperCase() + ") · sector " + gnb.sector + "</span>");
 
     zset("cell_id", d.cell_id || "—");
     ztoggle("cell", !!d.cell_id && f.is_lte);
     zset("nr5g_cell_id", d.nr5g_cell_id || "—");
-    ztoggle("5g_cell", !!d.nr5g_cell_id && (f.is_sa || f.is_nsa));
+    ztoggle("5g_cell", !!d.nr5g_cell_id && f.show_nr);
     zset("wan_ipaddr", S.wan.mwan_wanlan1_wan_ipaddr || "—");
     ztoggle("wanipinfo", !!S.wan.mwan_wanlan1_wan_ipaddr);
 
@@ -3506,7 +3938,7 @@
 
     // Cell locks
     var ll = d.lock_lte_cell && d.lock_lte_cell.trim() !== "" && d.lock_lte_cell !== "0,0";
-    var nl = d.lock_nr_cell && d.lock_nr_cell.trim() !== "" && d.lock_nr_cell !== "0,0,0";
+    var nl = !nr_cell_unlocked(d.lock_nr_cell);
     ztoggle("zte_lock_row", ll || nl);
     zhtml("zte_lock_status", '<span style="color:#D32F2F;">' +
       [ll ? "🔒 LTE " + esc(d.lock_lte_cell) : "", nl ? "🔒 5G " + esc(d.lock_nr_cell) : ""].filter(Boolean).join("<br>") + "</span>");
@@ -3595,6 +4027,23 @@
     zset("zte_total_rx", fmt_bytes(t.total_rx_bytes));
     zset("zte_total_tx", fmt_bytes(t.total_tx_bytes));
     zset("zte_total_time", fmt_duration(t.total_time));
+  }
+
+  // The router's uptime tells a restart apart from a dropped web session. Announced once per boot:
+  // the boot time (now − uptime) is remembered, so reloads do not repeat it.
+  var BOOT_NOTICE_MAX = 600; // s — only a restart in the last 10 minutes is worth a message
+  function note_router_boot(up) {
+    up = parseInt(up, 10);
+    if (isNaN(up) || up < 0) return;
+    var boot = Date.now() - up * 1000;
+    if (!S.boot_logged) { S.boot_logged = true; }
+    var seen = 0;
+    try { seen = Number(localStorage.getItem(LS.BOOT_SEEN)) || 0; } catch (e) { /* ignore */ }
+    if (Math.abs(boot - seen) < 90000) return; // same boot (uptime is read with some delay)
+    try { localStorage.setItem(LS.BOOT_SEEN, String(boot)); } catch (e) { /* ignore */ }
+    if (up <= BOOT_NOTICE_MAX) {
+      toast("The router restarted " + fmt_duration(up) + " ago.", "warn", 9000);
+    }
   }
 
   function update_device() {
@@ -4013,7 +4462,7 @@
   // Groups closed by default (the Dashboard group cannot fold at all)
   var GROUPS_CLOSED = ["RF Tuning & Locks", "Router Settings", "Advanced Tools"];
   // "2": the grouped layout starts from its own defaults; fold choices saved by 1.33–1.35 are not carried over
-  function collapse_key() { return "ZtePanelCollapse2:" + location.hostname; }
+  function collapse_key() { return collapse_ls_key(); }
   function load_collapse() { try { return JSON.parse(localStorage.getItem(collapse_key()) || "{}") || {}; } catch (e) { return {}; } }
   function save_collapse(m) { try { localStorage.setItem(collapse_key(), JSON.stringify(m)); } catch (e) { /* ignore */ } }
   function sec_title_text(sec) { var t = sec.querySelector(".zte_sec_title"); return t ? t.textContent.trim() : ""; }
@@ -4056,6 +4505,32 @@
   }
 
   // ─────────────────────────────────────────────
+  //  DEBUG TOGGLE (5 clicks on footer version text)
+  // ─────────────────────────────────────────────
+  function setup_debug_toggle() {
+    var foot = zel("zte_footer");
+    if (!foot || foot.dataset.zteDebugBound) return;
+    foot.dataset.zteDebugBound = "1";
+    var clicks = 0, timer = null;
+    foot.style.cursor = "pointer";
+    foot.title = "Click 5× to toggle debug logging";
+    foot.addEventListener("click", function () {
+      clicks++;
+      clearTimeout(timer);
+      timer = setTimeout(function () { clicks = 0; }, 2000);
+      if (clicks < 5) return;
+      clicks = 0;
+      CFG.debug = !CFG.debug;
+      try {
+        if (CFG.debug) localStorage.setItem(LS.DEBUG, "1");
+        else localStorage.removeItem(LS.DEBUG);
+      } catch (e) { /* ignore */ }
+      toast("Debug logging " + (CFG.debug ? "ON" : "OFF"), CFG.debug ? "ok" : "info");
+      console.info("[ZTE] debug logging " + (CFG.debug ? "ON" : "OFF"));
+    });
+  }
+
+  // ─────────────────────────────────────────────
   //  DRAG & MINIMIZE
   // ─────────────────────────────────────────────
   function make_draggable(panel) {
@@ -4088,7 +4563,7 @@
     b.addEventListener("click", function () {
       col = !col;
       
-      // Προσθήκη ή αφαίρεση της κλάσης 'minimized' στο πάνελ
+      // Toggle minimized class on the panel
       if (col) {
         panel.classList.add("minimized");
       } else {
@@ -4274,7 +4749,7 @@
     watch_logout_click();
     poll_loop();
     try { localStorage.removeItem("ZtePanelGpsSource"); } catch (e) {} // left over from older versions
-    try { localStorage.removeItem("ZtePanelLogoutAt"); } catch (e) {}  // left over from older versions (see USER_LOGOUT_KEY)
+    try { localStorage.removeItem(LS.LEGACY_LOGOUT); } catch (e) {}  // left over from older versions (see LS.USER_LOGOUT)
     setTimeout(read_sys_settings, 5000); // session timeout + temperature control, shown only if supported
     setTimeout(check_wifi, 3500); // hides the WiFi section on routers without WiFi
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
@@ -4284,6 +4759,7 @@
     setTimeout(load_qos_cap, 4000); // QoS support (once)
     setTimeout(load_tr069_cap, 4500); // TR-069 state (once)
     start_hidden_menus();
+    setup_debug_toggle(); // footer: 5 quick clicks toggle verbose console logging
     setTimeout(glock_resume_if_pending, 6500); // finish a guided LTE lock that a session drop interrupted
     setTimeout(reconnect_resume_if_pending, 600); // finish a mobile-data reconnect a reload interrupted — fire early to shorten the offline gap
     toast("ZTE Panel NG v" + CFG.version + " active", "ok");
@@ -4315,10 +4791,14 @@
     console.log("[ZTE] Panel NG v" + CFG.version + " loaded (ubus API)");
 
     // Versions up to ng1.23 kept the password hash under this name
-    try { localStorage.removeItem("ScriptPasswordHash"); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(LS.LEGACY_PW); } catch (e) { /* ignore */ }
+    // Restore debug flag from previous session
+    try { CFG.debug = localStorage.getItem(LS.DEBUG) === "1"; } catch (e) { /* ignore */ }
+    if (CFG.debug) console.info("[ZTE] debug logging ON");
 
     // Let the router's own page load first.
     await wait_page_settled();
+    dismiss_login_again();
     var logged_in = await check_login();
     // Right after an automatic login the router may answer "Access denied" once although the
     // login worked (it does that now and then). Ask a few more times before giving up.
@@ -4360,6 +4840,7 @@
     var t = setInterval(async function () {
       if (busy) return;
       busy = true;
+      dismiss_login_again();
       if (await check_login()) {
         clearInterval(t);
         await wait_page_settled(); // the router loads its main page right after the login

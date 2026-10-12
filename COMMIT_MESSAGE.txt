@@ -1,14 +1,23 @@
-v2026-ng1.37: reconnect no longer leaves data off, phone layout
+v2026-ng1.38: IPv6 DNS, checked cell locks, sturdier reconnect
 
-- Reconnect: the "turn mobile data back on" step stays pending until the
-  router has accepted it. If the router ends the web session in the middle
-  (seen on the MC7530), the panel finishes the step after the next login
-  instead of dropping it. Gives up after 4 tries or 10 minutes.
-- The pending step is also finished when a lost session comes back without
-  a page reload, and sooner after a reload.
-- Calmer messages while a reconnect logs the page out and back in.
-- Narrow screens (phones): the panel fits the width.
-- When collapsed, narrower panel header, to give access to top left corner for ZTE's GUI options.
-- Tip box and README: the fork's tip link is now PayPal.
-- README: reconnect note, compatibility (1.37 checks on all three routers)
-  and version history.
+- Manual DNS takes IPv6 too (primary and secondary). In the IPv6 prompt,
+  keep the values shown to keep them; empty or "-" means no IPv6 DNS;
+  "-" in one place clears just that one.
+- Cell locks: what you type is checked before anything is sent (PCI and
+  channel ranges; for 5G, that the channel belongs to the band). A 5G
+  cell lock is read back to confirm the router stored it.
+- Guided LTE cell lock: if the router does not switch to LTE only,
+  nothing is locked and the previous mode is put back.
+- Reconnect: when the router refuses the last step while the page is
+  still logged in, the panel checks whether data is already back and
+  otherwise tries again in the page.
+- The panel says when the router has just restarted.
+- Lighter polling (one request at a time); fixed the built-in SHA-256
+  used on plain-http pages for some input lengths; n77/n78 channels are
+  labelled as such in the neighbor scan; Esc closes dialogs; smaller
+  minimised panel on phones; five clicks on the footer switch on
+  verbose console logging.
+- tools/build_lite.py: the 5G probe's Restore button may call
+  send_nr_bands; only its definition must stay outside the removed block.
+- README: features, things to know, compatibility (1.38 checks on all
+  three routers) and version history.

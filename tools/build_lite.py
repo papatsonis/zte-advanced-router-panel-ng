@@ -73,7 +73,7 @@ rep("    poll_tick: 0,\n  });", "    poll_tick: 0,\n  };")
 # ── 5G band lock: same logic as the full edition; drop the probe and the API finder ──
 a = s.index("  // Developer tool: try several nr5g_type values")
 b = banner_before("  //  EXTRA FEATURES")
-assert "window.zte_probe_nr_nsa" in s[a:b] and "window.zte_find_api" in s[a:b] and "send_nr_bands" not in s[a:b]
+assert "window.zte_probe_nr_nsa" in s[a:b] and "window.zte_find_api" in s[a:b] and "function send_nr_bands" not in s[a:b]
 s = s[:a] + s[b:]
 rep('    zset("zte_nr_lock_type", nsa_type());\n', "")
 
