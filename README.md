@@ -10,6 +10,10 @@ This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advance
 
 *The Lite edition with demo data: how it opens (left) and with the three groups unfolded (right).*
 
+![Mobile View with panel folded (left) and unfolded (right)](img/mobile.png)
+
+*Mobile View with panel folded (left) and unfolded (right).*
+
 ## Two editions
 
 | Edition | For | Install |
