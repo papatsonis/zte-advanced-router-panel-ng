@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ZTE Advanced Router Panel NG Lite (ubus)
 // @namespace    https://github.com/papatsonis/zte-advanced-router-panel-ng
-// @version      2026-ng1.38
+// @version      2026-ng1.38.1
 // @description  ZTE signal monitor and controls for newer ubus-based routers (MC7520, MC7523/G5TC, MC7530 and later): signal, band lock, cell lock, network mode, ODU antenna selection, neighbor scan, bridge mode, DNS, APN, session timeout, temperature control, traffic stats, GPS, QoS speed cap, TR-069 remote-management toggles, hidden-page unlock, collapsible sections. Lite edition without the developer tools.
 // @author       papatsonis (based on work by Cerix and Thomas Pöchtrager)
 // @license      AGPL-3.0-or-later
@@ -91,7 +91,7 @@
   //  CONFIGURATION
   // ─────────────────────────────────────────────
   var CFG = {
-    version: "2026-ng1.38",
+    version: "2026-ng1.38.1",
     bmac: true,
     pollInterval: 1000,
     slowPollEvery: 5, // temperature, CPU/memory and WAN status are read on every 5th poll
@@ -108,7 +108,7 @@
     nr_all_bands: ["1", "3", "7", "8", "20", "28", "38", "40", "41", "75", "77", "78"],
     // Debug: set localStorage ZtePanelDebug=1 (or click the footer version 5×) to log ubus/actions.
     debug: false,
-    // Shared timing budgets (was scattered magic numbers)
+    // Shared timing budgets (ms)
     settleMs: 1500,
     reconnectOffWaitMs: 4000,
     scanSettleMs: 6000,
@@ -134,7 +134,6 @@
     session_lost: false,
     lost_checks: 0,
     expired_warned: false,
-    poll_timer: null,
     poll_tick: 0,
   };
 
@@ -354,7 +353,7 @@
     var out = new Array(pending.length);
     var idx = pending.map(function (_, i) { return i; });
     for (var attempt = 0; attempt < max && idx.length; attempt++) {
-      if (attempt) await new Promise(function (r) { setTimeout(r, 250); }); // never hammer the router
+      if (attempt) await sleep(250); // never hammer the router
       var slice = idx.map(function (i) { return pending[i]; });
       var res = await ubus(slice, opts);
       var list = Array.isArray(res) ? res : [res];
@@ -403,7 +402,7 @@
   //     works. A logout the ROUTER forces (session timeout, another login, a write that resets
   //     the session) is NOT a Logout click, so there the saved password IS used and the panel
   //     logs back in on its own. The two are told apart by whether a real, user-generated click
-  //     landed on a logout control (see USER_LOGOUT_KEY / watch_logout_click below).
+  //     landed on a logout control (see LS.USER_LOGOUT / watch_logout_click below).
   //   - Some firmwares pop a "Confirm logout?" dialog, so the actual logout can be seconds after
   //     the Logout click. A trusted Yes/OK inside that dialog refreshes the flag (so the skip
   //     window is measured from the confirmation, not the first click); a trusted No/Cancel
@@ -423,19 +422,16 @@
     GLOCK: "ZtePanelGuidedLock",          // localStorage JSON: guided LTE lock state machine
     HIDDEN: "ZtePanelHiddenMenus",        // localStorage: "1" = show hidden menus
     DEBUG: "ZtePanelDebug",               // localStorage: "1" = verbose console logging
-    LEGACY_LOGOUT: "ZtePanelLogoutAt",    // removed leftover from older versions
-    LEGACY_PW: "ScriptPasswordHash",      // removed leftover from ng≤1.23
+    // Old keys, removed at start-up:
+    LEGACY_LOGOUT: "ZtePanelLogoutAt",    // logout marker before LS.USER_LOGOUT
+    LEGACY_PW: "ScriptPasswordHash",      // password hash, ng≤1.23
+    LEGACY_GPS: "ZtePanelGpsSource",      // GPS source choice, older versions
+    LEGACY_COLLAPSE: "ZtePanelCollapse:", // + hostname: fold state of 1.33–1.35 (now ZtePanelCollapse2:)
   };
   function collapse_ls_key() { return "ZtePanelCollapse2:" + location.hostname; }
 
   var USER_LOGOUT_WINDOW = 60000;         // ms after a (confirmed) Logout during which the saved password is not used
   var LOGOUT_CONFIRM_WINDOW = 60000;      // ms after a Logout click during which a Yes/No in a confirm dialog still counts
-
-  // Aliases kept so the rest of the file reads cleanly (point at LS.*)
-  var PW_KEY = LS.PW;
-  var TRIED_KEY = LS.TRIED;
-  var USER_LOGOUT_KEY = LS.USER_LOGOUT;
-  var SEEN_KEY = LS.SEEN;
 
   function dlog() {
     if (!CFG.debug) return;
@@ -456,9 +452,6 @@
   }
 
   // One mutating operation per document. Reload-safe work stays in localStorage.
-  function op_current() {
-    return S.op || null;
-  }
   function op_start(name) {
     if (S.op && S.op !== name) {
       toast(name + " skipped — " + S.op + " is still running.", "warn");
@@ -489,7 +482,7 @@
   }
 
   function saved_hash() {
-    try { return localStorage.getItem(PW_KEY); } catch (e) { return null; }
+    try { return localStorage.getItem(LS.PW); } catch (e) { return null; }
   }
   function ms_since(storage, key) {
     var v = 0;
@@ -503,7 +496,7 @@
   // A logout the router forces (session timeout, a write that drops the session, another login)
   // sets no such flag, so there this returns false and the saved password is used to recover.
   function just_logged_out() {
-    return ms_since(localStorage, USER_LOGOUT_KEY) < USER_LOGOUT_WINDOW;
+    return ms_since(localStorage, LS.USER_LOGOUT) < USER_LOGOUT_WINDOW;
   }
 
   // Does this element (or a close ancestor) look like the router's Logout control?
@@ -572,17 +565,17 @@
       try {
         if (!e.isTrusted) return;                 // ignore synthetic clicks (forced logouts, scripts)
         if (is_logout_control(e.target)) {
-          stamp(localStorage, USER_LOGOUT_KEY);   // the user initiated a logout (localStorage: survives a modal dwell)
+          stamp(localStorage, LS.USER_LOGOUT);   // the user initiated a logout (localStorage: survives a modal dwell)
           return;
         }
         // A Yes/No that follows a recent logout click is the confirm dialog's answer. The recency
-        // of USER_LOGOUT_KEY itself is the "a logout is pending" signal — no sessionStorage needed.
+        // of LS.USER_LOGOUT itself is the "a logout is pending" signal — no sessionStorage needed.
         // Yes/No counts only inside a confirm dialog. A bare OK elsewhere must not refresh the logout flag.
-        if (ms_since(localStorage, USER_LOGOUT_KEY) < LOGOUT_CONFIRM_WINDOW && in_confirm_dialog(e.target)) {
+        if (ms_since(localStorage, LS.USER_LOGOUT) < LOGOUT_CONFIRM_WINDOW && in_confirm_dialog(e.target)) {
           if (el_label_is(e.target, CONFIRM_RE)) {
-            stamp(localStorage, USER_LOGOUT_KEY);  // confirmed — measure the skip window from now
+            stamp(localStorage, LS.USER_LOGOUT);  // confirmed — measure the skip window from now
           } else if (el_label_is(e.target, CANCEL_RE)) {
-            try { localStorage.removeItem(USER_LOGOUT_KEY); } catch (err) { /* ignore */ } // backed out — not a logout
+            try { localStorage.removeItem(LS.USER_LOGOUT); } catch (err) { /* ignore */ } // backed out — not a logout
           }
         }
       } catch (err) { /* ignore */ }
@@ -656,7 +649,7 @@
     async function save() {
       if (!inp.value) { toast("Type the router password first", "warn"); return; }
       var h = await sha256Hex(inp.value);
-      try { localStorage.setItem(PW_KEY, h); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(LS.PW, h); } catch (e) { /* ignore */ }
       ov.remove();
       update_login_state();
       toast("Password saved.\nIt is used the next time you open the router page.", "ok");
@@ -667,7 +660,7 @@
   };
 
   window.zte_forget_password = function () {
-    try { localStorage.removeItem(PW_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(LS.PW); } catch (e) { /* ignore */ }
     update_login_state();
     toast("Saved password removed", "info");
   };
@@ -768,7 +761,8 @@
   function nr_cell_unlocked(v) {
     return nr_cell_tokens(v).every(function (x) { return /^0+$/.test(x); });
   }
-  // The field order of lock_nr_cell differs between firmwares, so compare the three values as a set.
+  // lock_nr_cell is "pci,arfcn,band" on the MC7530, MC8532B and G5TC; other firmware may order it
+  // differently, so the three values are compared as a set.
   function nr_cell_matches(v, pci, arfcn, band) {
     var have = nr_cell_tokens(v).map(function (x) { return String(parseInt(x, 10)); }).sort().join(",");
     var want = [pci, arfcn, band].map(function (x) { return String(parseInt(x, 10)); }).sort().join(",");
@@ -1219,10 +1213,12 @@
   function reconnect_get() { return lsGetJson(LS.RECONNECT, RECONNECT_MAX_AGE, "at"); }
   function reconnect_clear() { try { localStorage.removeItem(LS.RECONNECT); } catch (e) { /* ignore */ } }
 
-  // Turn mobile data back on. The marker is cleared ONLY when the connection is up; if the ON is
-  // refused or never answered (the session may end around a data change), the marker is KEPT so
-  // the auto-login resume finishes it after the reload. A refused ON is not retried inside each try.
-  // S.reconnect_alive tells the caller whether the session was still there when it handed over.
+  // Turn mobile data back on. The marker is cleared ONLY when the connection is up. An ON that is
+  // refused or never answered is checked: still logged in and data up → done; still logged in and
+  // data down → one more ON. Otherwise (the session may end around a data change) the marker is
+  // KEPT so the auto-login resume finishes it after the reload. A refused ON (access denied) is not
+  // retried inside the first loop. S.reconnect_alive tells the caller whether the session was still
+  // there when it handed over.
   async function reconnect_turn_on(cur, where) {
     var on = null;
     S.reconnect_alive = false;
@@ -1305,7 +1301,7 @@
     var live = await get_wwan();
     if (wwan_up(live)) { reconnect_clear(); toast("Mobile data is back — reconnect finished ✓", "ok"); return; }
     if (!op_start("reconnect")) return;
-    // Counted BEFORE the attempt (as in 1.37), so attempts cut short by a reload still count.
+    // Counted BEFORE the attempt, so attempts cut short by a reload still count.
     st.tries = (st.tries || 0) + 1; try { localStorage.setItem(LS.RECONNECT, JSON.stringify(st)); } catch (e) { /* ignore */ }
     var cur = {
       connect_mode: live && live.connect_mode !== undefined ? live.connect_mode : st.connect_mode,
@@ -1550,9 +1546,10 @@
   };
 
   // ── DNS (zwrt_router.api router_get_dns_para / router_set_wan_dns) ──
-  // IPv6 as the router's own web UI does it (service_rpc.js): router_set_wan_dns also takes
-  // ipv6_prefer_dns_manual / ipv6_standby_dns_manual in manual mode, sent only when filled in, and
-  // the UI reads them back from uci zwrt_router "dns" as ipv6_wan_prefer_dns_manual / …standby….
+  // IPv6 as in the router's own web UI (service_rpc.js): router_set_wan_dns also takes
+  // ipv6_prefer_dns_manual / ipv6_standby_dns_manual in manual mode, and the values are read back
+  // from uci zwrt_router "dns" as ipv6_wan_prefer_dns_manual / …standby…. The router UI sends them
+  // only when filled in; the panel sends "" to clear one (the G5TC clears them when they are missing).
   function dnsf(d, k) {
     if (!d) return undefined;
     return d[k] !== undefined ? d[k] : d["wan_" + k];
@@ -1914,7 +1911,6 @@
       say("GPS request failed: " + e.message, "error");
     } finally {
       S.gps_busy = false;
-      S.gps_checked = true;
       if (typeof render_gnss === "function") render_gnss();
     }
   }
@@ -2821,7 +2817,7 @@
     while (Date.now() - t0 < budget) {
       try { await poll_once(true); } catch (e) { /* a hard drop is handled by the caller */ }
       if (pred(S.net || {})) return true;
-      await new Promise(function (r) { setTimeout(r, GLOCK_STEP_POLL); });
+      await sleep(GLOCK_STEP_POLL);
     }
     return false;
   }
@@ -2829,8 +2825,8 @@
   // One ubus setter for the routine. Throws when the session is gone, so the caller can recover.
   async function glock_call(desc, callObj) {
     var r = await ubusRetry(callObj);
-    // ubus() no longer throws; a refusal (access denied) or no answer at all is treated as a drop,
-    // so the routine goes through its recovery (check login → reload → resume) as before.
+    // ubus() does not throw: a refusal (access denied) or no answer at all is treated as a drop,
+    // so the routine goes through its recovery (check login → reload → resume).
     if (r && r.accessDenied) throw new Error("session lost at " + desc);
     if (r && r.network) throw new Error("no answer at " + desc + " (" + r.error + ")");
     return !!(r && r.success);
@@ -2908,7 +2904,7 @@
         st.phase = "settle"; glock_set(st);
       }
       if (st.phase === "settle") {
-        await new Promise(function (r) { setTimeout(r, 2500); });
+        await sleep(2500);
         st.phase = "restore"; glock_set(st);
       }
       if (st.phase === "restore") {
@@ -3533,7 +3529,7 @@
         if (!(await check_login())) { S.session_lost = true; S.lost_checks = 0; }
         return;
       }
-      stamp(sessionStorage, SEEN_KEY);
+      stamp(sessionStorage, LS.SEEN);
       set_dot(res.every(function (r) { return r.success; }) ? "ok" : "warn");
       schedule_ui();
     } catch (e) {
@@ -3569,7 +3565,7 @@
     // manual refresh. Guards (one attempt per drop, saved password, not a logout, no recent
     // auto-login) keep it from looping; after a failed reload the login page's own flow takes over.
     if (!S.self_heal_tried && S.lost_checks >= 3 && saved_hash() && !just_logged_out() &&
-        ms_since(sessionStorage, TRIED_KEY) > 90000) {
+        ms_since(sessionStorage, LS.TRIED) > 90000) {
       S.self_heal_tried = true;
       // During a mobile-data reconnect the page may refresh once or twice while the router logs
       // back in — say so plainly so it does not read as an error.
@@ -3588,7 +3584,7 @@
       await poll_once(S.poll_tick % CFG.slowPollEvery !== 0);
       S.poll_tick++;
     }
-    S.poll_timer = setTimeout(poll_loop, S.session_lost ? CFG.loginWaitInterval : CFG.pollInterval);
+    setTimeout(poll_loop, S.session_lost ? CFG.loginWaitInterval : CFG.pollInterval);
   }
 
   // ─────────────────────────────────────────────
@@ -4332,16 +4328,18 @@
     }
     S.init_done = true;
     S.started_at = Date.now();
-    try { sessionStorage.removeItem(TRIED_KEY); } catch (e) { /* ignore */ } // logged in: an automatic login, if any, worked
-    try { localStorage.removeItem(USER_LOGOUT_KEY); } catch (e) { /* ignore */ } // logged in again: any earlier Logout click is spent
-    stamp(sessionStorage, SEEN_KEY);
+    try { sessionStorage.removeItem(LS.TRIED); } catch (e) { /* ignore */ } // logged in: an automatic login, if any, worked
+    try { localStorage.removeItem(LS.USER_LOGOUT); } catch (e) { /* ignore */ } // logged in again: any earlier Logout click is spent
+    stamp(sessionStorage, LS.SEEN);
     inject_html();
     update_login_state();
     // Remember a deliberate Logout click, so the saved password is used only to recover from a
     // logout the router forced — never to undo a logout the user asked for.
     watch_logout_click();
     poll_loop();
-    try { localStorage.removeItem(LS.LEGACY_LOGOUT); } catch (e) {}  // left over from older versions (see LS.USER_LOGOUT)
+    [LS.LEGACY_GPS, LS.LEGACY_LOGOUT, LS.LEGACY_COLLAPSE + location.hostname].forEach(function (k) {
+      try { localStorage.removeItem(k); } catch (e) { /* ignore */ }
+    });
     setTimeout(read_sys_settings, 5000); // session timeout + temperature control, shown only if supported
     setTimeout(check_wifi, 3500); // hides the WiFi section on routers without WiFi
     setTimeout(update_gps, 6000); // one GPS read; afterwards only via "🛰 Refresh GPS"
@@ -4393,8 +4391,8 @@
     var logged_in = await check_login();
     // Right after an automatic login the router may answer "Access denied" once although the
     // login worked (it does that now and then). Ask a few more times before giving up.
-    for (var n = 0; !logged_in && n < 4 && ms_since(sessionStorage, TRIED_KEY) < 60000; n++) {
-      await new Promise(function (r) { setTimeout(r, 700); });
+    for (var n = 0; !logged_in && n < 4 && ms_since(sessionStorage, LS.TRIED) < 60000; n++) {
+      await sleep(700);
       logged_in = await check_login();
     }
     if (logged_in) return start_panel();
@@ -4403,11 +4401,11 @@
     if (saved_hash()) {
       if (just_logged_out()) {
         toast("Logged out. Auto login is skipped right after a logout —\nreload the page to log in automatically.", "info", 8000);
-      } else if (ms_since(sessionStorage, TRIED_KEY) < 60000) {
+      } else if (ms_since(sessionStorage, LS.TRIED) < 60000) {
         // The page was reloaded after an automatic login and is still logged out: do not try again
         toast("Auto login was just tried and the router page is still logged out.\nLog in on the router page.", "warn", 10000);
       } else {
-        stamp(sessionStorage, TRIED_KEY);
+        stamp(sessionStorage, LS.TRIED);
         var result = "error";
         try { result = await router_login(saved_hash()); } catch (e) { console.warn("[ZTE] Auto login error:", e.message); }
         if (result === "ok") {
@@ -4418,7 +4416,7 @@
           return;
         }
         if (result === "rejected") {
-          try { localStorage.removeItem(PW_KEY); } catch (e) { /* ignore */ }
+          try { localStorage.removeItem(LS.PW); } catch (e) { /* ignore */ }
           toast("Auto login failed — the router rejected the saved password, so it was removed.\nLog in on the router page, then save it again with 🔑 Auto Login.", "error", 15000);
         } else {
           toast("Auto login did not go through. Log in on the router page.", "warn", 10000);

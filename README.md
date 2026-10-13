@@ -10,6 +10,10 @@ This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advance
 
 *The Lite edition with demo data: how it opens (left) and with the three groups unfolded (right).*
 
+![Mobile View with panel folded (left) and unfolded (right)](img/mobile.png)
+
+*Mobile View with panel folded (left) and unfolded (right).*
+
 ## Two editions
 
 | Edition | For | Install |
@@ -141,6 +145,7 @@ On top of that, this fork adds the following — all capability-gated, so a cont
 
 ### Version history
 
+- **1.38.1** — code cleanup, no change in what the panel does: unused code and duplicate helpers removed, outdated comments corrected; an old fold-state entry left in the browser by 1.33–1.35 is now removed at start-up.
 - **1.38** — manual DNS takes IPv6 too (primary and secondary, or cleared); cell-lock entries are checked before anything is sent, and a 5G cell lock is read back to confirm it was stored; the guided LTE cell lock stops and restores your mode if the router does not switch to LTE only; a reconnect whose last step the router refuses while you are still logged in is finished in the page (it checks whether data is already back first); the panel says when the router has just restarted; lighter polling (one request at a time); the built-in SHA-256 used for auto login on plain-http pages was wrong for some input lengths and is fixed; 5G channels in the n77/n78 overlap are labelled as such in the neighbor scan; Esc closes the panel's dialogs; the minimised panel is smaller on phones; five clicks on the footer switch on verbose console logging.
 - **1.37** — a reconnect no longer leaves mobile data off when the router ends the session in the middle of it (seen on the MC7530): the panel keeps the step pending until the router has accepted it, and finishes it after the next login; calmer messages while that happens; on a narrow screen (a phone) the panel now fits the width instead of running off the side.
 - **1.36** — the panel is regrouped into Dashboard, RF Tuning & Locks, Router Settings and Advanced Tools, with the active locks shown on the folded RF bar; guided LTE cell lock; automatic re-login when the router ends the session, with an interrupted reconnect or cell lock finished afterwards; Logout is recognised through the router's confirmation dialog; the unused "Neighbor Cells (raw)" section is gone.

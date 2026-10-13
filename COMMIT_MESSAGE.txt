@@ -1,23 +1,13 @@
-v2026-ng1.38: IPv6 DNS, checked cell locks, sturdier reconnect
+v2026-ng1.38.1: cleanup, no change in behaviour
 
-- Manual DNS takes IPv6 too (primary and secondary). In the IPv6 prompt,
-  keep the values shown to keep them; empty or "-" means no IPv6 DNS;
-  "-" in one place clears just that one.
-- Cell locks: what you type is checked before anything is sent (PCI and
-  channel ranges; for 5G, that the channel belongs to the band). A 5G
-  cell lock is read back to confirm the router stored it.
-- Guided LTE cell lock: if the router does not switch to LTE only,
-  nothing is locked and the previous mode is put back.
-- Reconnect: when the router refuses the last step while the page is
-  still logged in, the panel checks whether data is already back and
-  otherwise tries again in the page.
-- The panel says when the router has just restarted.
-- Lighter polling (one request at a time); fixed the built-in SHA-256
-  used on plain-http pages for some input lengths; n77/n78 channels are
-  labelled as such in the neighbor scan; Esc closes dialogs; smaller
-  minimised panel on phones; five clicks on the footer switch on
-  verbose console logging.
-- tools/build_lite.py: the 5G probe's Restore button may call
-  send_nr_bands; only its definition must stay outside the removed block.
-- README: features, things to know, compatibility (1.38 checks on all
-  three routers) and version history.
+- Removed code nothing used (op_current, two state fields that were
+  written but never read) and the PW_KEY / TRIED_KEY / USER_LOGOUT_KEY /
+  SEEN_KEY aliases; the storage keys are used from the LS table directly.
+- Hand-written waits replaced by the existing sleep() helper.
+- Comments that no longer matched the code corrected (reconnect, DNS,
+  lock_nr_cell, guided lock).
+- Old storage keys are listed in the LS table; the fold state saved by
+  1.33-1.35 (ZtePanelCollapse:<address>) is now removed at start-up too.
+- tools/build_lite.py: Lite keeps the removal of old storage keys.
+- img/panel-full.png removed (not used by the README since 1.35).
+- README: 1.38.1 history entry.

@@ -183,7 +183,7 @@ rep("""'<div id="zte_footer">ZTE Panel NG v' +""", """'<div id="zte_footer">ZTE 
 cut("    if (!mode) {\n      mode = prompt(\n", '    return run_action("Network mode → "')
 
 # ── Start-up ───────────────────────────────────────────────────────────
-rep('    try { localStorage.removeItem("ZtePanelGpsSource"); } catch (e) {} // left over from older versions\n', "")
+# (the removal of old storage keys at start-up is kept in Lite too)
 rep('toast("ZTE Panel NG v" + CFG.version + " active", "ok");', 'toast("ZTE Panel NG Lite v" + CFG.version + " active", "ok");')
 rep(
     'console.log("[ZTE] Panel NG v" + CFG.version + " loaded (ubus API)");',
