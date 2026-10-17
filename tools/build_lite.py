@@ -180,7 +180,7 @@ cut("      // ── DEBUG (Full edition only) ──\n", "      GRP_CLOSE +\n  
 rep("""'<div id="zte_footer">ZTE Panel NG v' +""", """'<div id="zte_footer">ZTE Panel NG Lite v' +""")
 
 # network-mode prompt is no longer reachable (no "Custom…" button)
-cut("    if (!mode) {\n      mode = prompt(\n", '    return run_action("Network mode → "')
+cut("    if (!mode) {\n      mode = prompt(\n", '    var label = "Network mode → "')
 
 # ── Start-up ───────────────────────────────────────────────────────────
 # (the removal of old storage keys at start-up is kept in Lite too)
