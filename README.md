@@ -1,18 +1,34 @@
 # ZTE Advanced Router Panel NG
 
-A floating control panel for **newer ZTE 4G/5G routers** — the ones whose web interface talks to the router through the ubus JSON-RPC API (ZTE MC7520, MC7523/G5TC, MC7530 and later). Routers with the older "goform" web interface (for example the MC889A Pro) are not supported; the panel says so and stays off there. It is a userscript: it runs inside the router's own web page and adds signal details, band and cell locking, a neighbor scan, bridge mode, DNS, traffic statistics and more.
+A floating control panel for **ZTE 4G/5G routers**. It is a userscript: it runs inside the router's own web page and adds signal details, band and cell locking, network mode, a neighbor scan, bridge mode, ODU antenna selection, GPS, traffic statistics and more.
 
-This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advanced-router-panel) design by **Cerix** to the newer **ubus** routers, built on the ubus foundation of [ZTE-Script-NG](https://github.com/tpoechtrager/ZTE-Web-Script) by **Thomas Pöchtrager**, and adds a large set of controls on top. Ported and extended by **[papatsonis](https://github.com/papatsonis)** — see [What this fork adds](#what-this-fork-adds) and [Credits](#credits).
+It works with both APIs that ZTE routers use behind their web page:
 
-> **Older routers (MC888, MC889, MC7010 …)** use a different API. For those, use [Cerix's original panel](https://github.com/Cerix/zte-advanced-router-panel) or the [legacy ZTE-Script](https://github.com/tpoechtrager/ZTE-Web-Script).
+- **ubus** (JSON-RPC) — G5TC, MC7510, MC7530, MC8512, MC8532B and later;
+- **goform** — MC801A, MC888, MC888A / Ultra, MC888B, MC889, MC889A / Pro.
+
+What counts is the API, not how the router's web page looks: the MC888B and the MC889A Pro, for example, have the newer-looking web page but the goform API. The panel finds out by itself which API your router has. You install the same script either way and see the same panel; a control appears only if your router supports it.
+
+This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advanced-router-panel) design by **Cerix** to the ubus routers, built on the ubus foundation of [ZTE-Script-NG](https://github.com/tpoechtrager/ZTE-Web-Script) by **Thomas Pöchtrager**, and adds a large set of controls on top. Ported and extended by **[papatsonis](https://github.com/papatsonis)** — see [What this fork adds](#what-this-fork-adds) and [Credits](#credits).
 
 ![The Lite edition with demo data: the default view, and with the three groups opened](img/panel-lite.png)
 
-*The Lite edition with demo data: how it opens (left) and with the three groups unfolded (right).*
+*The Lite edition (1.40) with demo data: how it opens (left) and with the three groups unfolded (right).*
 
 ![Mobile View with panel folded (left) and unfolded (right)](img/mobile.png)
 
-*Mobile View with panel folded (left) and unfolded (right).*
+*On a phone: the panel folded over the router's page (left) and unfolded (right). Photo from version 1.37 on a real router; private values blacked out. The session line no longer shows the IP-renewal countdown ("IP ↻") since 1.40.*
+
+## Upgrading from 1.39 or earlier: install again
+
+> **Version 1.40 has a new name.** Up to 1.39 the script was called **"ZTE Advanced Router Panel NG (ubus)"** (Lite: **"… NG Lite (ubus)"**). It now serves the goform routers too, so the "(ubus)" is gone: **"ZTE Advanced Router Panel NG"** and **"ZTE Advanced Router Panel NG Lite"**.
+>
+> Userscript managers know a script by its name, so **the old installation does not update itself to 1.40**. To upgrade:
+>
+> 1. Install 1.40 with one of the links in [Two editions](#two-editions).
+> 2. Delete (or disable) the old "… (ubus)" script in Tampermonkey / Violentmonkey.
+>
+> Do not keep both enabled: 1.40 notices an older copy that started first and stays off (*"Another ZTE panel script is already running on this page"*), but an old copy that starts second does not check. Your settings (auto-login password, folded sections) are kept in the browser for the router's address, so the new installation finds them as they were.
 
 ## Two editions
 
@@ -37,53 +53,57 @@ The panel has four groups: **Dashboard** (always open), **RF Tuning & Locks**, *
 
 | Section | What it does |
 |---|---|
-| **Network** | Provider, network type, active bands, total bandwidth, LTE and 5G carrier aggregation, eNodeB / gNodeB, cell IDs, WAN IP, temperature, session time with a countdown to the next IP renewal |
+| **Network** | Provider, network type, active bands, total bandwidth, LTE and 5G carrier aggregation, eNodeB / gNodeB, cell IDs, WAN IP, temperature, connection time |
 | **Signal** | One card per LTE and 5G carrier: RSRP, RSRQ, SINR, RSSI, (E)ARFCN, PCI, bandwidth, frequency; copy a signal report |
-| **ODU antenna selection** | Automatic, directional (front), directional wide beam (rear) or omnidirectional. The options and their names are read from the router's own Developer options page. Shown only on models that have this setting |
-| **Neighbor scan & force connect** | Runs the router's built-in neighbor scan and lets you lock to any cell it finds |
-| **Connection** | Reconnect mobile data, DNS (manual IPv4 and IPv6, or operator), bridge mode on/off, ARP proxy on/off, reboot |
-| **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only |
-| **LTE bands / 5G bands** | One-click band locks with live status. Each frame lists the bands your router supports (read from the router); a button that needs a band it does not have is left out, and such a band is refused in "Custom". A 5G lock is written to both the SA and the NSA list and read back to confirm it was saved |
-| **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all locks. What you type is checked before anything is sent (PCI range, channel range, and for 5G that the channel belongs to the band). A 5G cell lock is read back to confirm the router stored it. An LTE cell lock is applied in steps — LTE only, lock, back to the mode you were in — because a lock set directly in 5G NSA stalls the connection; if the router does not switch to LTE only, nothing is locked and your mode is put back |
-| **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters; set the automatic reset day |
-| **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile) |
-| **GPS** | Whether the router has GPS, and its position with a map link. Says "not available on this router" when it has none |
-| **WiFi** | Radio info, transmit power, country. Hidden on routers without WiFi (outdoor units such as the MC7530) |
-| **Remote management & QoS** | QoS global speed cap (upload/download limit) with the router's own priority profiles read live from it (automatic, game, web page, video), and TR-069 (ACS) control: turn CWMP on or off, and turn Periodic Inform on or off, with both states shown. QoS appears only in router mode; both appear only where the router answers |
-| **Login** | Optional auto login, developer login, and the session timeout (how long until the router logs you out; shown only if the router supports it) |
+| **ODU antenna selection** | Outdoor units: automatic, directional or omnidirectional, with the names the router uses. On goform routers also an **Auto-test** that tries each setting and keeps the best one. Shown only on models that have this setting |
+| **Neighbor scan & force connect** | The cells the router can see, and a lock to any of them |
+| **Connection** | Reconnect mobile data, DNS, bridge mode on/off, ARP proxy on/off (ubus routers), reboot |
+| **Network mode** | 5G SA, 5G NSA, 4G/5G auto, LTE only — asks before it changes anything |
+| **LTE bands / 5G bands** | One-click band locks with live status. Each frame lists the bands your router supports (read from the router); a lock the panel set is marked 🔒. Every lock is read back from the router before it shows ✓ |
+| **Cell lock** | Lock or unlock an LTE cell (PCI + EARFCN) or a 5G cell (PCI + ARFCN + band); reset all band and cell locks. What you type is checked before anything is sent, and the lock is read back. The panel says when a lock needs a network-mode switch or a restart to apply |
+| **Traffic statistics** | Live speeds, session, monthly and all-time totals; reset the monthly counters |
+| **Device info** | CPU temperature and load, memory, uptime, WAN details, SIM info, hardware/software versions, SMS storage, APN (view and switch profile on ubus routers) |
+| **GPS** | The position with a map link, or the last known one while there is no fix. Shown only on routers with GPS. Newer goform firmware sends the position encrypted; the panel lets the router's own page decrypt it |
+| **WiFi** | Radio info, transmit power, country. Hidden on routers without WiFi |
+| **Remote management & QoS** | QoS global speed cap with the router's own priority profiles, and TR-069 (ACS): CWMP and Periodic Inform on/off on ubus routers, the TR-069 state (read only) on goform routers. ACS addresses, users and passwords are never shown |
+| **Login** | Optional auto login, developer login, and the session timeout (where the router supports it) |
 | **Temperature control** | The firmware's overheating protection, on or off. Shown only if the router supports it |
-| **Hidden menus & pages** | Shows menu entries the router's web interface hides, and lists pages the firmware has but links no menu entry for — which the panel can open |
+| **Hidden menus & pages** | Shows menu entries the router's web interface hides, and lists pages the firmware has but links no menu entry for (Developer options, TR-069, SMS pages, …) — which the panel can open |
 
 **Full edition only:** API finder (searches the router's own web code for a keyword), call recorder (logs the calls the router's pages make), custom ubus call, raw netinfo dump, raw scan data, 5G NSA lock probe.
 
 ## Compatibility
 
-Tested on a **ZTE MC7530**, an **MC8532B**, a **G5TC** (B07 firmware), an **MC7510** (G5F) and an **MC8512** (G5 Ultra). For 1.36 the controls were run through on the first three, except bridge mode, reboot and the TR-069 switches, which were not toggled on every unit. For 1.37 automatic login, the guided cell lock and the reconnect were run again on those three; for 1.38 the cell locks, manual DNS with IPv6, the guided cell lock and the reconnect; for 1.39 the reconnect, the band and cell locks and the network mode on all five, and the neighbor scan on the MC7530, the G5TC and the MC8532B (the MC7510's firmware refuses it). The basic calls come from ZTE-Script-NG, which was written for the G5TC and later models; the rest were taken from the MC7530's own web interface. Other ubus-based ZTE routers may work fully or only partly — firmware differs between models and operators.
+**ubus routers:** tested on a **G5TC** (B07 firmware), an **MC7510** (G5F, ODU), an **MC7530**, an **MC8512** (G5 Ultra) and an **MC8532B** (G5 Pro). For 1.40 the band and cell locks, network mode, reconnect, bridge/router mode, QoS, TR-069, WiFi transmit power and GPS were run on these models (each where the model has the feature).
+
+**goform routers:** tested on an **MC801A**, an **MC888**, an **MC888A** and **MC888A Ultra**, an **MC888B**, an **MC889**, an **MC889A** (generic and operator firmware, before and after an update) and an **MC889A Pro**: band and cell locks with unlock, Reset ALL with restart, network mode, reconnect, antenna selection and Auto-test, GPS, auto login and the developer login.
+
+Firmware differs between models and operators, so another ZTE router may work fully or only partly. If something misbehaves, please [open an issue](https://github.com/papatsonis/zte-advanced-router-panel-ng/issues) with the router model, its firmware version (ℹ️ HW / SW Version in the panel) and what you did.
 
 ## Things to know before you click
 
 - **Everything stays local.** The script only talks to your router. The only outside links are the ones you click yourself (the map link and the tip links).
 - **You log in on the router's own page.** The panel starts once you are in and pauses whenever you are logged out.
-- **Auto login is optional and off by default.** If you turn it on (🔑 Auto Login), a SHA-256 hash of the router password is kept in the browser's storage for the router's address. Anyone who can use that browser profile can then open the router page, and the hash itself is enough to log in — so do not turn it on on a shared computer. "Forget Password" removes it.
+- **Auto login is optional and off by default.** If you turn it on (🔑 Auto Login), a hash of the router password is kept in the browser's storage for the router's address. Anyone who can use that browser profile can then open the router page, and the hash itself is enough to log in — so do not turn it on on a shared computer. "Forget Password" removes it.
+- **Some changes need more rights than the normal login.** On some goform firmware a band or cell lock is refused with the normal login. The panel then tries the developer login once with the saved auto-login password, without asking; if that does not work it opens a dialog for the developer password and, for cell locks on routers that have one (MC888), the super admin password. The password you type goes to the router's own login function for that session only — it is never stored or shown. The change is then sent once more.
 - **Band and cell locks stay in place** until you remove them. "Remove band lock" works by locking to all bands of your router. The panel reads that list from the router; only if the router reports none does it use the lists in the `CFG` block.
-- **Locking to a cell of another operator** leaves the router without service until you unlock it. An LTE cell lock is applied for you in steps (LTE only → lock → back to your mode); expect the connection to drop for 10–20 seconds. On the MC7510 (G5F) and the G51F it is sent in one step instead (see below). A 5G cell lock takes effect after you switch network mode or reboot.
-- **MC7510 (G5F) and G51F: one radio change at a time.** The MC7510 re-attaches the modem for about 20 seconds after every radio change (network mode, band lock, cell lock), and changes sent closer together than that can leave the router without service and its web page not answering until a power cycle. On these models the panel therefore waits 25 seconds between two such changes, sends an LTE cell lock directly (no LTE-only step, which this firmware does not need), removes a cell lock with the router's own reset — which also puts the band locks back to the router's defaults, as the router's own page does — and waits 20 seconds after switching mobile data off before switching it back on. The panel recognises them by the model name (MC7510) or the commercial name (G5F, G51F) the router reports. The G51F is included because it is expected to behave the same way, but it has not been tested yet.
-- **MC7510, G51F and MC8512 (MediaTek): 5G NSA band lock.** On these models only one value of the router's band-lock type reaches the 5G NSA list; every other value overwrites the 5G SA list. The panel always uses that value there and the 5G NSA lock probe is not offered. The MC8512 (G5 Ultra) is otherwise a normal router — it was tested with the normal radio changes, the guided cell lock and the reconnect.
-- **Problems on your model?** If a lock, a band change or a reconnect misbehaves on your router (no service afterwards, the router page stops answering, the panel waits forever), please [open an issue](https://github.com/papatsonis/zte-advanced-router-panel-ng/issues) with the router model, its firmware version (ℹ️ HW / SW Version in the panel) and what you did.
-- **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable.
-- **ARP proxy** is a hidden setting of the firmware. The router accepts the switch only in a developer session, so the panel asks for the router password if none is saved. The panel shows the stored setting; if nothing changes on your network after switching, reboot the router.
-- **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline). **Hidden pages** lists pages the firmware has but links no menu entry for — such as the TR-069 config and Developer options pages — and can open them: the web interface is a single-page app that loads a page without checking the menu, so the panel asks it to load the page directly and the router draws it as it normally would. Some of these belong to features your model does not have, so a page may come up empty; opening a page only displays it — the router's own access rules still decide what any control on it may change.
-- **QoS** sets one global speed cap for the whole router (an upload and a download limit) using the firmware's own priority profiles, whose names are read live from the router. It is a router-mode feature, so the panel hides it in bridge mode, and shows it only on models that answer the QoS calls.
-- **TR-069 (ACS)** is how an operator manages the router remotely. The panel can turn CWMP on or off and turn Periodic Inform on or off independently, and shows both states. It never reads or handles the ACS password — changes round-trip through the firmware's own functions, which keep the password inside the router. It is shown only where the router answers.
-- **Groups and sections fold away.** Click a group bar or a section title to collapse or expand it (▾ / ▸). The panel opens with Network and Signal expanded and the rest folded, and remembers your choice per router. Collapsing does not stop anything from updating — it just hides it.
-- **The neighbor scan disconnects mobile data** while it runs (about 30 seconds). The panel turns it back on afterwards.
-- **Reconnect** switches mobile data off and on again. On some firmware (seen on the MC7530, the MC7510 and, at times, on a G5TC) the router stops answering for a while and then ends the web session when it does that. With a saved password the panel logs in again and makes sure mobile data is back on by itself — this can take one or two page reloads and up to about a minute and a half. Without a saved password, log in again and the panel switches mobile data back on.
-- **Manual DNS** takes IPv4 and, optionally, IPv6 (primary, secondary). In the IPv6 prompt, keep the values shown to keep them; leave it empty or type `-` for no IPv6 DNS; `-` in one place clears just that one (e.g. `2606:4700:4700::1111,-`). In automatic mode some routers show the operator's DNS instead of the stored manual values.
-- **Router restarts** — if the router started up within the last 10 minutes (a power cut, a reboot), the panel says so once. That tells a restart apart from the router just ending the web session.
-- **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic switching* in normal use. A change may ask for the router password (developer session) and lasts until the next reboot.
-- **Temperature control** is the firmware's protection against overheating; keep it on. If you turn it off, the router turns it back on after a restart.
-- **Session timeout** accepts 60–86400 seconds. Setting it is not offered by the router's own web interface; the panel uses the firmware's own call for it.
-- **Sections depend on the model.** The ODU antenna, WiFi and hidden-settings sections appear only when the router answers their calls, and GPS says "not available" on routers without it.
+- **Locking to a cell of another operator** leaves the router without service until you unlock it. On ubus routers an LTE cell lock is applied for you in steps (LTE only → lock → back to your mode); expect the connection to drop for 10–20 seconds. On goform routers a cell lock often applies only after a restart — the panel offers one, and you can say no and let it apply at the next restart.
+- **One radio change at a time.** Network mode, band and cell locks, the scan, the reconnect and the guided lock refuse to start while another one is running and say what is still running. A change the router does not answer is read back, never sent twice.
+- **MC7510 (G5F) and G51F.** The MC7510 re-attaches the modem for about 20 seconds after every radio change, and changes sent closer together than that can leave it without service until a power cycle. On these models the panel waits 25 seconds between two such changes, sends an LTE cell lock directly, removes a cell lock with the router's own reset (which also puts the band locks back to the router's defaults) and waits 20 seconds between data off and on. The G51F is expected to behave the same way but has not been tested.
+- **MC7510, G51F and MC8512 (MediaTek): 5G NSA band lock.** Only one value of the router's band-lock type reaches the 5G NSA list on these models; the panel always uses that one there.
+- **Bridge mode** turns the router's routing off: the device on the LAN port gets the mobile IP directly, and Wi-Fi clients may lose internet. Try it from a computer connected by cable. The router restarts to switch.
+- **ARP proxy** (ubus routers) is a hidden setting of the firmware; the router accepts the switch only in a developer session. If nothing changes on your network after switching, reboot the router.
+- **Hidden Menus** shows menu entries and page parts that the router's own web interface hides (marked with a dashed outline). **Hidden pages** lists pages the firmware has but links no menu entry for and can open them; the router draws them as it normally would. A page of a feature your model does not have may come up empty; the router's own access rules still decide what any control on it may change.
+- **QoS** sets one global speed cap for the whole router (an upload and a download limit) using the firmware's own priority profiles. It is a router-mode feature, so the panel hides it in bridge mode.
+- **TR-069 (ACS)** is how an operator manages the router remotely. On ubus routers the panel can turn CWMP and Periodic Inform on or off; the ACS password stays inside the router. On goform routers the state is shown read only.
+- **Groups and sections fold away.** Click a group bar or a section title to collapse or expand it (▾ / ▸). The panel remembers your choice per router. Collapsing does not stop anything from updating.
+- **The neighbor scan disconnects mobile data** on ubus routers while it runs (about 30 seconds). The panel turns it back on afterwards.
+- **Reconnect** switches mobile data off and on again. On some firmware the router ends the web session when it does that. With a saved password the panel logs in again and makes sure mobile data is back on by itself — this can take one or two page reloads. Without a saved password, log in again and the panel finishes the reconnect (on goform routers it asks first when the login comes more than 10 minutes later).
+- **DNS**: on ubus routers the panel sets manual IPv4 and, optionally, IPv6 DNS (in the IPv6 prompt, keep the values shown to keep them; leave it empty or type `-` for none; `-` in one place clears just that one). On goform routers it opens the router's own page where DNS is set.
+- **Router restarts** — if the router started within the last 10 minutes (a power cut, a reboot you did not start from the panel), the panel says so once. A restart the panel asked for is expected and logged in again by itself.
+- **ODU antenna selection** is meant for debugging, according to ZTE: keep *Automatic* in normal use.
+- **Temperature control** is the firmware's protection against overheating; keep it on.
+- **Session timeout** accepts 60–86400 seconds. The router's own web interface does not offer it; the panel uses the firmware's own call.
 
 This project is not affiliated with ZTE. Use it at your own risk.
 
@@ -91,8 +111,8 @@ This project is not affiliated with ZTE. Use it at your own risk.
 
 With a saved password, the panel logs in for you when you open the router page and nobody is logged in. It logs in once and then reloads the page once, so that the router's own page starts up already logged in — you see a short flash of the login form first.
 
-- It is skipped for about a minute after you press **Logout** (and confirm it), so logging out works. Reload the page later to log in again.
-- If the router itself ends the session while the page is open — a timeout, or a change that resets it — the panel reloads the page once and logs in again. A guided cell lock or a reconnect that was cut off by this is finished afterwards.
+- It is skipped for about a minute after you press **Logout**, so logging out works. Reload the page later to log in again.
+- If the router itself ends the session while the page is open — a timeout, a restart, or a change that resets it — the panel logs in again. A reconnect or guided cell lock that was cut off by this is finished afterwards.
 - Without a saved password the panel never logs in: it pauses and waits for you.
 - If the router rejects the saved password, the panel removes it and tells you.
 
@@ -104,55 +124,57 @@ A small `CFG` block at the top of the script holds the settings most people migh
 var CFG = {
   bmac: true,              // false hides the tip box
   pollInterval: 1000,      // ms between signal refreshes
-  ip_cycle_hours: 4,       // countdown to the operator's IP renewal; 0 hides it
   lte_all_bands: [...],    // used only if the router does not report its own LTE bands
   nr_all_bands: [...],     // used only if the router does not report its own 5G bands
 };
 ```
 
+Five quick clicks on the panel's footer switch on verbose logging in the browser console (and off again); the setting is remembered in the browser.
+
 ## Development
 
-The Lite edition is generated from the full one. Edit only `zte-advanced-panel-ng.user.js`, then run:
+The Lite edition is generated from the Full one. Edit only `zte-advanced-panel-ng.user.js`, then run:
 
 ```sh
 python3 tools/build_lite.py
 ```
 
-The build stops with an error if the full script has changed in a way it does not expect, rather than producing a broken Lite edition.
-
-Five quick clicks on the panel's footer switch on verbose logging in the browser console (and off again); the setting is remembered in the browser.
+It needs Python 3 and Node.js (the result is checked with `node --check`). The build stops with an error if the Full script has changed in a way it does not expect, rather than producing a broken Lite edition. The published scripts carry no code comments (they are about a quarter smaller this way).
 
 ## What this fork adds
 
-This fork brings together **Cerix's panel** (designed for ZTE's older routers) and the **ubus foundation of ZTE-Script-NG** (a monitoring-and-locking panel for the newer G5TC-and-later models), then extends it with a large set of **control** features — tested across the MC7530, MC8532B, G5TC, MC7510 and MC8512.
+This fork brings together **Cerix's panel** (designed for ZTE's goform routers) and the **ubus foundation of ZTE-Script-NG** (for the G5TC-and-later models), extends it with a large set of **control** features, and since 1.40 serves the goform routers too, with the same panel.
 
 From ZTE-Script-NG it inherits the ubus groundwork: signal monitoring, band and cell locking, network-mode switching, traffic statistics, device info, WiFi and login handling.
 
 On top of that, this fork adds the following — all capability-gated, so a control appears only if the router answers for it:
 
+- **Both APIs** — ubus and goform, detected by itself, with one panel. On goform routers the panel works through the router page's own functions.
 - **Connection controls** — reconnect mobile data, DNS settings (IPv4 and IPv6), bridge mode on/off, reboot.
 - **ARP proxy** on/off.
-- **Neighbor scan & force connect** — run the router's scan and lock to any cell it finds.
+- **Neighbor scan & force connect** — see the cells the router can see and lock to any of them.
 - **APN** — view and switch profile.
-- **ODU antenna selection** — option names read from the router's own developer page.
-- **GPS / GNSS** — including models that lack the `zwrt_gnss` service.
+- **ODU antenna selection** — option names read from the router; Auto-test on goform routers.
+- **GPS / GNSS** — including models that lack the `zwrt_gnss` service, and encrypted positions on newer goform firmware.
 - **Session timeout** and **temperature control**.
-- **Band lists read from the router**, so only bands your model supports are offered.
+- **Band lists read from the router**, so only bands your model supports are offered, and every lock read back.
+- **Developer and super admin login** when a change needs it — tried once with the saved password, otherwise asked in a dialog, never stored.
 - **QoS** — a global speed cap with the router's own priority profiles, read live.
 - **TR-069 (ACS)** — CWMP and Periodic Inform toggles, without the panel ever handling the ACS password.
-- **Hidden menus & pages** — reveals, and can open, pages the firmware hides (TR-069 config, Developer options).
+- **Hidden menus & pages** — reveals, and can open, pages the firmware hides (TR-069 config, Developer options, SMS pages).
 - **Four groups with collapsible sections**, remembered per router, and a lock summary on the folded RF bar.
-- **Guided LTE cell lock** — LTE only, lock, back to your mode, so the lock takes without stalling 5G NSA. Cell-lock entries are checked first, and a 5G cell lock is read back.
+- **Guided LTE cell lock** — LTE only, lock, back to your mode, so the lock takes without stalling 5G NSA.
 - **Recovery from a lost session** — with a saved password the panel logs in again when the router ends the session, and finishes a reconnect or cell lock that was cut off.
 - **Two editions** — Lite (everyday) and Full (adds API-exploration tools), with Lite generated from Full by a build script.
 
 ### Version history
 
-- **1.39** — a sturdier reconnect: it never sends a second "data on" while one may still be pending, it does not take an IPv6-only connection for "connected", it gives up with a clear message after 6 tries or 10 minutes, and it finishes after a re-login; the neighbor scan does not start when the mobile-data state cannot be read, puts mobile data back even after a session drop, and its results survive the re-login and later reloads (15 minutes); one radio change at a time — mode, band and cell locks, the scan, the reconnect and the guided lock refuse to start while another one is running and say what is still running; the MC7510 (G5F) and G51F get their own handling (25 s between radio changes, a direct LTE cell lock, unlock by the router's reset, LTE bands above B64 such as B71, nothing sent when nothing would change); on the MC7510, G51F and MC8512 the 5G NSA band lock uses the only value that reaches the NSA list, and a 5G band lock sends nothing until the router model has been read; network-mode, 5G band-lock and LTE band-lock results are read back from the router and a ✓ shows what it really reports (no early "✓" with the old connection, no false "not saved" on routers that are slow to show the new list); the band status shows "reading…" until the router's band lists are read; the LTE cell-lock prompt starts on the current cell; the DNS window shows the DNS in use; QoS limits above 127 Mb/s are stored correctly (the panel asks first when a value cannot be stored exactly); passwords, keys and SIM identifiers are hidden in copied reports; routers with the older goform web interface (MC889A Pro) get a clear "not supported" message and no login attempts; less flicker (cards are redrawn only when they change).
-- **1.38.1** — code cleanup, no change in what the panel does: unused code and duplicate helpers removed, outdated comments corrected; an old fold-state entry left in the browser by 1.33–1.35 is now removed at start-up.
-- **1.38** — manual DNS takes IPv6 too (primary and secondary, or cleared); cell-lock entries are checked before anything is sent, and a 5G cell lock is read back to confirm it was stored; the guided LTE cell lock stops and restores your mode if the router does not switch to LTE only; a reconnect whose last step the router refuses while you are still logged in is finished in the page (it checks whether data is already back first); the panel says when the router has just restarted; lighter polling (one request at a time); the built-in SHA-256 used for auto login on plain-http pages was wrong for some input lengths and is fixed; 5G channels in the n77/n78 overlap are labelled as such in the neighbor scan; Esc closes the panel's dialogs; the minimised panel is smaller on phones; five clicks on the footer switch on verbose console logging.
-- **1.37** — a reconnect no longer leaves mobile data off when the router ends the session in the middle of it (seen on the MC7530): the panel keeps the step pending until the router has accepted it, and finishes it after the next login; calmer messages while that happens; on a narrow screen (a phone) the panel now fits the width instead of running off the side.
-- **1.36** — the panel is regrouped into Dashboard, RF Tuning & Locks, Router Settings and Advanced Tools, with the active locks shown on the folded RF bar; guided LTE cell lock; automatic re-login when the router ends the session, with an interrupted reconnect or cell lock finished afterwards; Logout is recognised through the router's confirmation dialog; the unused "Neighbor Cells (raw)" section is gone.
+- **1.40** — **routers with the goform API are supported** (MC801A, MC888, MC888A / Ultra, MC888B, MC889, MC889A / Pro) by the same panel: signal, band and cell locks, network mode, reconnect, reboot, bridge mode, ODU antenna with Auto-test, GPS (also encrypted), neighbor cells, device info, hidden pages, auto login and a developer / super admin login when a change needs it. The name loses "(ubus)" — see [Upgrading](#upgrading-from-139-or-earlier-install-again). On ubus routers: every change read back before ✓ and an unanswered one checked, never sent twice; network-mode changes ask first; cell IDs shown in decimal, "no cell" IDs hidden; a calm note for a restart the panel asked for; the GPS section only where there is GPS; the IP-renewal countdown removed. Secrets are never shown or copied; the published scripts carry no comments.
+- **1.39** — a sturdier reconnect and neighbor scan; one radio change at a time; network-mode and band-lock results read back before ✓; MC7510 (G5F) / G51F handling (25 s between radio changes, direct LTE cell lock, unlock by the router's reset, LTE bands above B64); the MediaTek 5G NSA band-lock value on the MC7510, G51F and MC8512; QoS limits above 127 Mb/s stored correctly; secrets hidden in copied reports; less flicker.
+- **1.38.1** — code cleanup only; no change in what the panel does.
+- **1.38** — IPv6 manual DNS; cell-lock entries checked before sending and read back; the guided LTE cell lock restores your mode when it cannot switch; an interrupted reconnect is finished in the page; restart notice; lighter polling; auto-login SHA-256 fix; Esc closes dialogs; verbose logging by five clicks on the footer.
+- **1.37** — a reconnect cut off by a session end (MC7530) is finished after the next login instead of leaving data off; calmer messages; the panel fits a phone screen.
+- **1.36** — four groups (Dashboard, RF Tuning & Locks, Router Settings, Advanced Tools) with the active locks on the folded RF bar; guided LTE cell lock; automatic re-login that finishes an interrupted reconnect or cell lock; Logout recognised.
 - **1.35** — credits and authorship (this section, header and footer).
 - **1.34** — removed a redundant 5G carrier badge; ARP proxy shows its default.
 - **1.33** — collapsible sections, remembered per router.
@@ -169,7 +191,7 @@ On top of that, this fork adds the following — all capability-gated, so a cont
 
 This panel exists because of other people's work:
 
-- **[papatsonis](https://github.com/papatsonis)** — this fork: the port to the ubus JSON-RPC API and the features in [What this fork adds](#what-this-fork-adds). Built on the work below; not maintained or endorsed by those authors. Tips: [paypal.me/skaranik](https://paypal.me/skaranik)
+- **[papatsonis](https://github.com/papatsonis)** — this fork: the port to the ubus JSON-RPC API, the goform backend and the features in [What this fork adds](#what-this-fork-adds). Built on the work below; not maintained or endorsed by those authors. Tips: [paypal.me/skaranik](https://paypal.me/skaranik)
 - **[Cerix](https://github.com/Cerix/zte-advanced-router-panel)** — *ZTE Advanced Router Panel* (MIT). The panel's design, layout and feature set come from it. Tips: [buymeacoffee.com/cerix](https://buymeacoffee.com/cerix)
 - **[Thomas Pöchtrager](https://github.com/tpoechtrager/ZTE-Web-Script)** — *ZTE-Script-NG* (AGPLv3+). The ubus calls, login flow, signal parsing and frequency tables come from it. Tips: PayPal `t.poechtrager@gmail.com`
 - **[open-u60-pro](https://github.com/jesther-ai/open-u60-pro)** by Jesther Silvestre and **[zte-u60-pro-mu5250-manager](https://github.com/faying/zte-u60-pro-mu5250-manager)** by faying (both MIT) — their research on the ZTE U60 Pro showed which ubus calls exist for the neighbor scan, mobile data on/off, DNS, APN, ARP proxy and resetting locks. Only the call and parameter names were used; no code from them is included.

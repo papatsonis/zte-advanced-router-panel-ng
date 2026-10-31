@@ -1,13 +1,21 @@
-v2026-ng1.38.1: cleanup, no change in behaviour
+v2026-ng1.40: goform routers supported, name without "(ubus)"
 
-- Removed code nothing used (op_current, two state fields that were
-  written but never read) and the PW_KEY / TRIED_KEY / USER_LOGOUT_KEY /
-  SEEN_KEY aliases; the storage keys are used from the LS table directly.
-- Hand-written waits replaced by the existing sleep() helper.
-- Comments that no longer matched the code corrected (reconnect, DNS,
-  lock_nr_cell, guided lock).
-- Old storage keys are listed in the LS table; the fold state saved by
-  1.33-1.35 (ZtePanelCollapse:<address>) is now removed at start-up too.
-- tools/build_lite.py: Lite keeps the removal of old storage keys.
-- img/panel-full.png removed (not used by the README since 1.35).
-- README: 1.38.1 history entry.
+- Routers with the goform API (MC801A, MC888, MC888A / Ultra, MC888B,
+  MC889, MC889A / Pro) are served by the same panel, detected by
+  itself: signal, band and cell locks, network mode, reconnect, reboot,
+  bridge mode, ODU antenna with Auto-test, GPS (also encrypted), neighbor
+  cells, device info, hidden pages, auto login, and a developer / super
+  admin login when a change needs it (the password is never stored).
+- Script name without "(ubus)": "ZTE Advanced Router Panel NG" and
+  "... NG Lite". Breaks the automatic update from 1.39 - the README
+  explains how to reinstall.
+- ubus routers: every change read back before ✓, an unanswered one
+  checked and never sent twice; network-mode changes ask first; cell
+  IDs in decimal, "no cell" IDs hidden; calm note for a restart the
+  panel asked for; GPS section only where there is GPS; IP-renewal
+  countdown removed.
+- Secrets (passwords, keys, SIM identifiers) never shown or copied.
+- Published Full / Lite carry no code comments; tools/build_lite.py
+  now builds Lite from the published Full and checks the result.
+- README: goform support, ubus / goform compatibility, upgrade note,
+  shorter version history; img/panel-lite.png redone with 1.40.
