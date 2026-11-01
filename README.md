@@ -17,7 +17,7 @@ This brings the [ZTE Advanced Router Panel](https://github.com/Cerix/zte-advance
 
 ![Mobile View with panel folded (left) and unfolded (right)](img/mobile.png)
 
-*On a phone: the panel folded over the router's page (left) and unfolded (right). Photo from version 1.37 on a real router; private values blacked out. The session line no longer shows the IP-renewal countdown ("IP ↻") since 1.40.*
+*On a phone: the panel folded over the router's page (left) and unfolded (right). Photo from a real router; private values blacked out. The session line no longer shows the IP-renewal countdown ("IP ↻") since 1.40.*
 
 ## Upgrading from 1.39 or earlier: install again
 
